@@ -1,0 +1,14 @@
+# ROOT files
+*.root
+
+# Model files
+*.json
+*.ubj
+*.model
+
+# Output plots
+*.png
+*.pdf
+*.jpg
+
+

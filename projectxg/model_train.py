@@ -9,7 +9,6 @@ import xgboost as xgb
 import vector
 import argparse
 import functions as func
-from sklearn.model_selection import train_test_split
 
 filter_name=[
             "ReconstructedParticles/ReconstructedParticles.*",
@@ -161,10 +160,7 @@ def train_model(X, Y):
     X_array = np.asarray(X[["E_over_p", "isolation_frac", "is_leading", "charge"]])
     Y_array = np.asarray(Y)
 
-    X_train, X_val, Y_train, Y_val = train_test_split(X_array, Y_array, test_size=0.2, random_state=42)
-
-    dtrain = xgb.DMatrix(X_train, label=Y_train)
-    dval = xgb.DMatrix(X_val, label=Y_val)
+    dtrain = xgb.DMatrix(X_array, label=Y_array)
 
     params = {
         'objective' : 'binary:logistic',
@@ -176,8 +172,8 @@ def train_model(X, Y):
         'scale_pos_weight' : 4.5
     }
 
-    watch = [(dtrain, 'train'), (dval, 'eval')]
-    model = xgb.train(params, dtrain, num_boost_round=200, evals=watch, early_stopping_rounds=20)
+    watch = [(dtrain, 'train')]
+    model = xgb.train(params, dtrain, num_boost_round=200, evals=watch)
     
     return model
 
