@@ -7,7 +7,6 @@ import awkward as ak
 import uproot
 import xgboost as xgb
 import vector
-import matplotlib.pyplot as plt
 import argparse
 import functions as func
 from sklearn.model_selection import train_test_split
