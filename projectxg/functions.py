@@ -1,7 +1,6 @@
 import awkward
 import numpy as np
 
-
 def match_particle(reco_rec, reco_sim, barrel_clu, barrel_mc, barrel_E, endcapP_clu, endcapP_mc, endcapP_E, endcapN_clu, endcapN_mc, endcapN_E, n_reco):
     barrel_E_out = [0.0] * n_reco # columns of zeroes that are as long as the number of reconstructed particles
     endcapN_E_out = [0.0] * n_reco
