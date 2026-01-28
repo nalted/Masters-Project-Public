@@ -1,5 +1,6 @@
-import awkward
+import awkward as ak
 import numpy as np
+import vector
 
 def match_particle(reco_rec, reco_sim, barrel_clu, barrel_mc, barrel_E, endcapP_clu, endcapP_mc, endcapP_E, endcapN_clu, endcapN_mc, endcapN_E, n_reco):
     barrel_E_out = [0.0] * n_reco # columns of zeroes that are as long as the number of reconstructed particles
@@ -27,6 +28,7 @@ def match_particle(reco_rec, reco_sim, barrel_clu, barrel_mc, barrel_E, endcapP_
         if mc_index in mc_to_reco:
             reco_index = mc_to_reco[mc_index]
             endcapP_E_out[reco_index] = endcapP_E[clu_index]
+    return barrel_E_out, endcapP_E_out, endcapN_E_out
 
 def calculate_isolation(eta, phi, cluster_E, cone_size = 0.4):
     isolation_E = [] # creates empty list
@@ -44,7 +46,7 @@ def calculate_isolation(eta, phi, cluster_E, cone_size = 0.4):
 
             dR = np.sqrt(d_eta**2 + d_phi**2)
 
-            iso_winners = (dR < cone_size) 
+            iso_winners = (dR < cone_size) & (dR > 0) # dR > 0 to exclude itself 
             iso_energy = ak.sum(event_E[iso_winners]) # sum for particles in event
 
             event_iso.append(iso_energy)
@@ -54,8 +56,8 @@ def calculate_isolation(eta, phi, cluster_E, cone_size = 0.4):
     return ak.Array(isolation_E)
 
 def find_greatest_pt(pt_array):
-    for particle in range(pt_array):
+    is_leading = ak.zeros_like(pt_array, dtype=bool)
+    for particle in range(len(pt_array)):
         max_index = ak.argmax(pt_array[particle])
-        is_leading[particle, max_index]
-        return is_leading
-
+        is_leading[particle, max_index] = True
+    return is_leading
