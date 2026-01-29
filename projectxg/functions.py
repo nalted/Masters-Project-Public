@@ -56,8 +56,12 @@ def calculate_isolation(eta, phi, cluster_E, cone_size):
     return ak.Array(isolation_E)
 
 def find_greatest_pt(pt_array):
-    is_leading = ak.zeros_like(pt_array, dtype=bool)
-    for particle in range(len(pt_array)):
-        max_index = ak.argmax(pt_array[particle]) # finds index of max pt value for each particle
-        is_leading[particle, max_index] = True # gives a True value to that index in is_leading array
-    return is_leading
+    is_leading = []
+    for event_pt in pt_array:
+        if len(event_pt) == 0:
+            is_leading.append([])
+        else:
+            max_index = ak.argmax(event_pt) # finds index of max pt value for event
+            event_flags = [i == max_index for i in range(len(event_pt))]
+            is_leading.append(event_flags)
+    return ak.Array(is_leading)

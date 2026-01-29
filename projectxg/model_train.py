@@ -151,7 +151,7 @@ def process_features(events):
     X_df = pd.DataFrame({
         "E_over_p": ak.to_numpy(E_over_p_features),
         "isolation_frac": ak.to_numpy(isolation_features),
-        "is_leading": ak.to_numpy(is_leading_features, dtype=int),
+        "is_leading": ak.to_numpy(is_leading_features).astype(int),
         "charge": ak.to_numpy(charge_features)
     })    
     Y_df = ak.to_numpy(label_features)
