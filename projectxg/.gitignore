@@ -12,3 +12,5 @@
 *.jpg
 
 
+pictures/
+model_outputs/
