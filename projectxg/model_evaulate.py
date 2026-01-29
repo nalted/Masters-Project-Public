@@ -8,20 +8,21 @@ import argparse
 from sklearn.metrics import roc_curve, auc, confusion_matrix
 from model_train import load_data, process_features
 
+# loads a trained model from a saved file
 def load_model(model_path):
     model = xgb.Booster()
     model.load_model(model_path)
     return model
 
 def plot_roc_curve(Y_true, Y_pred, output_path=None):
-    fpr, tpr, _ = roc_curve(Y_true, Y_pred)
+    fpr, tpr, _ = roc_curve(Y_true, Y_pred) # false positive rate, true positive rate
     roc_auc = auc(fpr, tpr)
     
     plt.figure(figsize=(8, 6))
-    plt.plot(fpr, tpr, label=f'ROC curve (AUC = {roc_auc:.3f})', linewidth=2)
+    plt.plot(tpr, 1 - fpr, label=f'ROC curve (AUC = {roc_auc:.3f})', linewidth=2)
     plt.plot([0, 1], [0, 1], 'k--', label='Random classifier')
-    plt.xlabel('False Positive Rate', fontsize=12)
-    plt.ylabel('True Positive Rate', fontsize=12)
+    plt.xlabel('signal efficiency', fontsize=12)
+    plt.ylabel('background rejection', fontsize=12)
     plt.title('ROC Curve', fontsize=14)
     plt.legend(loc='lower right', fontsize=11)
     plt.grid(alpha=0.3)
@@ -32,6 +33,7 @@ def plot_roc_curve(Y_true, Y_pred, output_path=None):
     else:
         plt.show()
     plt.close()
+    # to save in pictures/ folder, python model_evaluate.py --model-in ....json --input-files ....root --output-prefix pictures/my_model_eval
 
 def plot_score_distribution(Y_true, Y_pred, output_path=None):
     signal_scores = Y_pred[Y_true == 1]

@@ -30,7 +30,7 @@ def match_particle(reco_rec, reco_sim, barrel_clu, barrel_mc, barrel_E, endcapP_
             endcapP_E_out[reco_index] = endcapP_E[clu_index]
     return barrel_E_out, endcapP_E_out, endcapN_E_out
 
-def calculate_isolation(eta, phi, cluster_E, cone_size = 0.4):
+def calculate_isolation(eta, phi, cluster_E, cone_size):
     isolation_E = [] # creates empty list
 
     for event_eta, event_phi, event_E in zip(eta, phi, cluster_E):
@@ -58,6 +58,6 @@ def calculate_isolation(eta, phi, cluster_E, cone_size = 0.4):
 def find_greatest_pt(pt_array):
     is_leading = ak.zeros_like(pt_array, dtype=bool)
     for particle in range(len(pt_array)):
-        max_index = ak.argmax(pt_array[particle])
-        is_leading[particle, max_index] = True
+        max_index = ak.argmax(pt_array[particle]) # finds index of max pt value for each particle
+        is_leading[particle, max_index] = True # gives a True value to that index in is_leading array
     return is_leading
