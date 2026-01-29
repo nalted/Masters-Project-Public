@@ -59,7 +59,7 @@ def find_greatest_pt(pt_array):
     is_leading = []
     for event_pt in pt_array:
         if len(event_pt) == 0:
-            is_leading.append([])
+            is_leading.append([]) # for event with no particles, edge case to stop it breaking
         else:
             max_index = ak.argmax(event_pt) # finds index of max pt value for event
             event_flags = [i == max_index for i in range(len(event_pt))]
