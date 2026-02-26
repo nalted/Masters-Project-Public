@@ -1,1 +1,46 @@
+# Data and specific directories
+data/
 rootfiles/
+model_outputs/
+pictures/
+
+# ROOT & Physics Binary formats
+*.root
+*.hdf5
+*.h5
+*.bin
+*.dat
+
+# Machine Learning / Model files
+*.json
+*.ubj
+*.model
+
+# Output plots
+*.png
+*.pdf
+*.jpg
+
+# Python & Jupyter cache
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# IDE, Editor, and Temp files
+.vscode/
+*.swp
+*.swo
+*.swn
+*.swm
+*.swf
+*~
+*#
+.#*
+*.tmp
+*.temp
+*.bak
+*.orig
+*.backup
+*.old
+*.save
+*.kate-swp
