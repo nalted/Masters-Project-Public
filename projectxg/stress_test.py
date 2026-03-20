@@ -78,6 +78,24 @@ def build_three_class_masks(x_df, y_true):
     return all_mask, scattered_e_mask, hfs_mask
 
 
+def build_event_level_arrays(event_ids, scores, truth_flags_represented):
+    event_ids = np.asarray(event_ids).astype(int)
+    scores = np.asarray(scores, dtype=float)
+
+    unique_event_ids = np.asarray(np.unique(event_ids), dtype=int)
+    event_scores = np.asarray(
+        [np.max(scores[event_ids == evt]) for evt in unique_event_ids],
+        dtype=float,
+    )
+
+    truth_lookup = {
+        int(evt): bool(flag)
+        for evt, flag in truth_flags_represented.items()
+    }
+    event_truth = np.asarray([truth_lookup.get(int(evt), False) for evt in unique_event_ids], dtype=int)
+    return unique_event_ids, event_scores, event_truth
+
+
 def shared_bins(values_a, values_b, values_c, feature_name):
     if feature_name == "E_over_p":
         return np.linspace(0.0, 1.5, 51)
@@ -272,21 +290,51 @@ def main():
     X = np.asarray(X_df[mt.FEATURE_COLUMNS])
     scores = model.predict_proba(X)[:, 1]
 
-    if (threshold is None) and (len(np.unique(y_true)) == 2):
-        threshold, best_f1 = compute_best_threshold(y_true, scores)
+    event_ids = X_df["event_id"].to_numpy().astype(int)
+    truth_flag_map = {
+        int(evt): bool(flag)
+        for evt, flag in zip(represented_event_ids, truth_flags_represented)
+    }
+    unique_event_ids, event_scores, event_truth = build_event_level_arrays(
+        event_ids,
+        scores,
+        truth_flag_map,
+    )
+
+    if (threshold is None) and (len(np.unique(event_truth)) == 2):
+        threshold, best_f1 = compute_best_threshold(event_truth, event_scores)
         threshold_source = "stress_max_f1"
 
     metrics = {}
-    if len(np.unique(y_true)) == 2:
-        metrics["roc_auc"] = float(roc_auc_score(y_true, scores))
-        metrics["average_precision"] = float(average_precision_score(y_true, scores))
+    if len(np.unique(event_truth)) == 2:
+        metrics["event_roc_auc"] = float(roc_auc_score(event_truth, event_scores))
+        metrics["event_average_precision"] = float(average_precision_score(event_truth, event_scores))
 
     selected_count = None
     selected_fraction = None
+    selected_event_count = None
+    selected_event_fraction = None
+    event_efficiency = None
+    event_purity = None
     if threshold is not None:
         selected_mask = scores > threshold
         selected_count = int(np.sum(selected_mask))
         selected_fraction = float(np.mean(selected_mask))
+
+        selected_event_mask = event_scores > threshold
+        selected_event_count = int(np.sum(selected_event_mask))
+        selected_event_fraction = float(np.mean(selected_event_mask))
+
+        event_metrics = model_evaluate.compute_event_level_metrics(
+            y_val=y_true,
+            val_pred=scores,
+            event_id_val=event_ids,
+            best_threshold=threshold,
+            truth_has_scattered_event_val=truth_flags_represented,
+            val_events=represented_event_ids,
+        )
+        event_efficiency = float(event_metrics["event_efficiency"])
+        event_purity = float(event_metrics["event_purity"])
 
     npz_out = out_prefix.with_name(f"{out_prefix.name}_scores.npz")
     np.savez_compressed(
@@ -317,7 +365,6 @@ def main():
         print(f"Saved per-particle CSV: {csv_out}")
 
     summary_out = out_prefix.with_name(f"{out_prefix.name}_summary.txt")
-    event_ids = X_df["event_id"].to_numpy()
     n_events = int(np.unique(event_ids).size)
     signal_event_ids = event_ids[y_true == 1]
     n_events_with_true_signal = int(np.unique(signal_event_ids).size)
@@ -340,6 +387,9 @@ def main():
         f.write(f"n_events_with_truth_scattered_firstmatch={n_true_scattered_events_represented}\n")
         f.write(f"n_events_without_truth_scattered_firstmatch={n_events_no_truth_scattered}\n")
         f.write(f"n_events_with_true_signal={n_events_with_true_signal}\n")
+        f.write(f"n_events_eventlevel={len(unique_event_ids)}\n")
+        f.write(f"n_events_eventlevel_truth_scattered={int(np.sum(event_truth == 1))}\n")
+        f.write(f"n_events_eventlevel_truth_background={int(np.sum(event_truth == 0))}\n")
         f.write(f"n_particles={len(scores)}\n")
         f.write(f"n_true_signal={int(np.sum(y_true == 1))}\n")
         f.write(f"n_true_background={int(np.sum(y_true == 0))}\n")
@@ -353,9 +403,15 @@ def main():
                 f.write(f"valdata_best_f1={best_f1:.8f}\n")
             f.write(f"selected_count={selected_count}\n")
             f.write(f"selected_fraction={selected_fraction:.8f}\n")
-        if "roc_auc" in metrics:
-            f.write(f"roc_auc={metrics['roc_auc']:.8f}\n")
-            f.write(f"average_precision={metrics['average_precision']:.8f}\n")
+            f.write(f"selected_event_count={selected_event_count}\n")
+            f.write(f"selected_event_fraction={selected_event_fraction:.8f}\n")
+            if event_efficiency is not None:
+                f.write(f"event_efficiency={event_efficiency:.8f}\n")
+            if event_purity is not None:
+                f.write(f"event_purity={event_purity:.8f}\n")
+        if "event_roc_auc" in metrics:
+            f.write(f"event_roc_auc={metrics['event_roc_auc']:.8f}\n")
+            f.write(f"event_average_precision={metrics['event_average_precision']:.8f}\n")
 
     efficiency_chain_out = out_prefix.with_name(f"{out_prefix.name}_efficiency_chain.txt")
     mt.print_and_save_efficiency_chain(
@@ -372,6 +428,9 @@ def main():
     print(f"Saved stress efficiency chain: {efficiency_chain_out}")
     if threshold is not None:
         print(f"Applied threshold={threshold:.6f} ({threshold_source})")
+        if (event_efficiency is not None) and (event_purity is not None):
+            print(f"Event-level efficiency={event_efficiency:.6f}")
+            print(f"Event-level purity={event_purity:.6f}")
     else:
         print("No threshold applied (raw score output only).")
 
@@ -388,7 +447,7 @@ def main():
             print("Skipped threshold-dependent plots because no threshold was resolved.")
             return
         if best_f1 is None:
-            _, best_f1 = compute_best_threshold(y_true, scores)
+            _, best_f1 = compute_best_threshold(event_truth, event_scores)
 
         model_evaluate.plot_feature_importance_avg_gain(
             model,
@@ -401,22 +460,25 @@ def main():
             plot_context="Stress Test",
         )
         model_evaluate.plot_purity_efficiency_curve(
-            y_true,
-            scores,
+            event_truth,
+            event_scores,
             threshold,
             best_f1,
-            f"{plot_prefix}_purity_efficiency_bestf1.png",
-            plot_context="Stress Test",
+            f"{plot_prefix}_purity_efficiency_bestf1_event_level.png",
+            plot_context="Stress Test (Event-level)",
         )
-        model_evaluate.plot_2d_q2x_maps(
+        model_evaluate.plot_2d_q2x_maps_event_level(
             scores,
             y_true,
+            event_ids,
             q2,
             x,
             threshold,
             best_f1,
-            f"{plot_prefix}_q2x_phase_space.png",
+            f"{plot_prefix}_q2x_phase_space_event_level.png",
             plot_context="Stress Test",
+            truth_has_scattered_event_val=truth_flags_represented,
+            val_events=represented_event_ids,
         )
         model_evaluate.plot_input_distributions_tp(
             X,

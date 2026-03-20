@@ -36,6 +36,11 @@ Notes:
 - Evaluation plots are saved under `pictures/eval_<tag>/`.
 - Plot titles follow publication-style formatting and include context prefixes (`Training:` or `Stress Test:`).
 - Legends use `scattered electron` wording (instead of `signal`) for electron-class entries.
+- Q2-x outputs now include both:
+	- `*_q2x_phase_space_candidate_level.png`
+	- `*_q2x_phase_space_event_level.png`
+- Console diagnostics now include event-level efficiency/purity and event-level confusion counts.
+- No new CLI flags were added for this update; existing commands remain valid.
 
 To run stress-test inference on stress ROOT campaigns (supports normal and underscore association branch names), run:
 
@@ -47,16 +52,25 @@ python stress_test.py --model-in model_outputs/xgb_18x275_minQ2=1_29Jan2026.json
 
 This writes:
 - *_scores.npz with per-particle score arrays and features
-- *_summary.txt with particle counts and metrics
+- *_summary.txt with particle counts plus event-level metrics (event AUC/AP, event efficiency, event purity)
 - optional *_scores.csv when --save-csv is provided
-- the same plot suite as `model_evaluate.py`, saved under `pictures/stress_<tag>/` (avg gain, total gain, purity-efficiency with max-F1 threshold, Q2-x map, TP/TN/FN input distributions)
+- stress plots under `pictures/stress_<tag>/`, including:
+	- `*_importance_avg_gain.png`
+	- `*_importance_total_gain.png`
+	- `*_purity_efficiency_bestf1_event_level.png`
+	- `*_q2x_phase_space_event_level.png`
+	- `*_input_distributions_tp.png`
+	- `*_input_distributions_tn.png`
+	- `*_input_distributions_fn.png`
 - *_input_distributions_3class.png in `pictures/stress_<tag>/` with overlaid feature distributions for all particles, scattered electrons, and charged HFS
 - *_isolation_cone_scan_3class.png in `pictures/stress_<tag>/` with the same three classes scanned across cone-size choices from `--isolation-cones`
 
 Notes:
 - Stress outputs are also tagged automatically with beam energies unless `--campaign-tag` is provided.
 - If your `--output-prefix` already includes the selected tag, the tag is not appended again (prevents duplicate suffixes).
-- `--val-data` is optional for stress inference; provide it when you want threshold selection from validation instead of stress labels.
+- `--val-data` is optional for stress inference; provide it when you want threshold selection from validation arrays.
+- If `--threshold` is not provided and `--val-data` is not provided, the stress script chooses the threshold by max F1 on event-level labels/scores.
+- No new CLI flags were added for this update; behavior and output naming were updated.
 - Use `--no-plots` if you only want score outputs.
 - `--isolation-cone-size` sets the cone used for the model input feature `isolation_frac` during stress inference.
 - `--signal-generator-statuses` controls which generator-status values are accepted when choosing the first final-state electron as truth signal (default: `1`).
