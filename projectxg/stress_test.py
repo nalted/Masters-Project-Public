@@ -157,7 +157,7 @@ def plot_isolation_cone_scan_three_class(events, args, output_path):
     )
 
     for ax, cone in zip(axes, cones):
-        x_df_cone, y_true_cone, _ = mt.process_features(
+        x_df_cone, y_true_cone, _, _ = mt.process_features(
             events,
             p_tot,
             rot_y_angle,
@@ -254,7 +254,7 @@ def main():
         args.beam_protons,
         args.crossing_angle,
     )
-    X_df, y_true, truth_has_scattered_event = mt.process_features(
+    X_df, y_true, truth_has_scattered_event, efficiency_counts = mt.process_features(
         events,
         p_tot,
         rot_y_angle,
@@ -268,17 +268,6 @@ def main():
     truth_flags_represented = truth_has_scattered_event[represented_event_ids]
     n_true_scattered_events_represented = int(np.sum(truth_flags_represented))
     n_events_no_truth_scattered = int(np.sum(~truth_flags_represented))
-
-    print(f"stress events represented: {n_events_represented}")
-    print(
-        "true scattered electrons in represented stress events "
-        "(same first-match logic as labels): "
-        f"{n_true_scattered_events_represented}"
-    )
-    print(
-        "represented stress events with no truth scattered electron found: "
-        f"{n_events_no_truth_scattered}"
-    )
 
     X = np.asarray(X_df[mt.FEATURE_COLUMNS])
     scores = model.predict_proba(X)[:, 1]
@@ -368,8 +357,19 @@ def main():
             f.write(f"roc_auc={metrics['roc_auc']:.8f}\n")
             f.write(f"average_precision={metrics['average_precision']:.8f}\n")
 
+    efficiency_chain_out = out_prefix.with_name(f"{out_prefix.name}_efficiency_chain.txt")
+    mt.print_and_save_efficiency_chain(
+        efficiency_counts,
+        n_train_events=n_events_represented,
+        n_val_events=0,
+        n_train_signal=int(np.sum(y_true == 1)),
+        n_val_signal=0,
+        output_path=str(efficiency_chain_out),
+    )
+
     print(f"Saved stress scores NPZ: {npz_out}")
     print(f"Saved stress summary: {summary_out}")
+    print(f"Saved stress efficiency chain: {efficiency_chain_out}")
     if threshold is not None:
         print(f"Applied threshold={threshold:.6f} ({threshold_source})")
     else:

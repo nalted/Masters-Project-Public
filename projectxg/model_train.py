@@ -401,8 +401,19 @@ def process_features(
     truth_pdg = ak.Array(truth_pdg_per_reco)
     truth_gen = ak.Array(truth_gen_per_reco)
 
-    # Keep only particles with matched calorimeter energy; all downstream features are built on this set.
-    mask = matched_calo_E > 0
+    # Candidate definition requires matched calorimeter energy.
+    # Diagnostics below compare before/after against the full
+    # ReconstructedChargedParticles branch population.
+    calo_cluster_mask = matched_calo_E > 0
+
+    labels_flat = ak.to_numpy(ak.flatten(labels)).astype(int)
+    calo_mask_flat = ak.to_numpy(ak.flatten(calo_cluster_mask)).astype(bool)
+
+    n_scattered_total = int(np.sum(labels_flat == 1))
+    n_background_total = int(np.sum(labels_flat == 0))
+    n_scattered_kept_calo = int(np.sum((labels_flat == 1) & calo_mask_flat))
+    n_background_kept_calo = int(np.sum((labels_flat == 0) & calo_mask_flat))
+    mask = calo_cluster_mask
 
     boosted_px_kept = boosted_px[mask]
     boosted_py_kept = boosted_py[mask]
@@ -453,7 +464,81 @@ def process_features(
 
     y = ak.to_numpy(ak.flatten(labels_kept))
 
-    return X_df, y, truth_has_scattered_event
+    efficiency_counts = {
+        "n_events_total": int(len(truth_has_scattered_event)),
+        "n_truth_scattered_events": int(np.sum(truth_has_scattered_event)),
+        "n_signal_candidates_pre_calo": n_scattered_total,
+        "n_signal_candidates_post_calo": n_scattered_kept_calo,
+        "n_background_candidates_pre_calo": n_background_total,
+        "n_background_candidates_post_calo": n_background_kept_calo,
+    }
+
+    return X_df, y, truth_has_scattered_event, efficiency_counts
+
+
+def print_and_save_efficiency_chain(
+    efficiency_counts,
+    n_train_events,
+    n_val_events,
+    n_train_signal,
+    n_val_signal,
+    output_path,
+):
+    """Print and save the end-to-end selection-efficiency chain."""
+    n_events_total = int(efficiency_counts["n_events_total"])
+    n_truth_scattered_events = int(efficiency_counts["n_truth_scattered_events"])
+    n_signal_pre_calo = int(efficiency_counts["n_signal_candidates_pre_calo"])
+    n_signal_post_calo = int(efficiency_counts["n_signal_candidates_post_calo"])
+    n_background_pre_calo = int(efficiency_counts["n_background_candidates_pre_calo"])
+    n_background_post_calo = int(efficiency_counts["n_background_candidates_post_calo"])
+
+    n_used_signal = int(n_train_signal + n_val_signal)
+    n_used_events = int(n_train_events + n_val_events)
+    n_lost_truth_to_label = int(n_truth_scattered_events - n_signal_pre_calo)
+    n_lost_label_to_calo = int(n_signal_pre_calo - n_signal_post_calo)
+    n_split_diff = int(n_signal_post_calo - n_used_signal)
+    n_background_lost_calo = int(n_background_pre_calo - n_background_post_calo)
+
+    eff_truth_to_label = (100.0 * n_signal_pre_calo / n_truth_scattered_events) if n_truth_scattered_events > 0 else 0.0
+    eff_label_to_calo = (100.0 * n_signal_post_calo / n_signal_pre_calo) if n_signal_pre_calo > 0 else 0.0
+    eff_truth_to_final = (100.0 * n_used_signal / n_truth_scattered_events) if n_truth_scattered_events > 0 else 0.0
+    signal_loss_pct = (100.0 * n_lost_label_to_calo / n_signal_pre_calo) if n_signal_pre_calo > 0 else 0.0
+    background_loss_pct = (100.0 * n_background_lost_calo / n_background_pre_calo) if n_background_pre_calo > 0 else 0.0
+
+    chain_lines = [
+        "=" * 70,
+        "SELECTION EFFICIENCY CHAIN",
+        "=" * 70,
+        f"All events loaded: {n_events_total}",
+        f"Truth-scattered events (event-level): {n_truth_scattered_events}",
+        "",
+        "Signal-candidate chain:",
+        f"1) Reco signal candidates before calo mask: {n_signal_pre_calo}",
+        f"2) Reco signal candidates after calo mask:  {n_signal_post_calo}",
+        f"   - loss at calo mask: {n_lost_label_to_calo} ({(100.0 - eff_label_to_calo):.2f}%)",
+        f"3) Signal candidates used in train+val:      {n_used_signal}",
+        f"   - split consistency (step2-step3): {n_split_diff}",
+        "",
+        "Class-dependent calo-mask candidate losses:",
+        f"- scattered electron: {n_lost_label_to_calo}/{n_signal_pre_calo} ({signal_loss_pct:.2f}%)",
+        f"- background:         {n_background_lost_calo}/{n_background_pre_calo} ({background_loss_pct:.2f}%)",
+        "",
+        "Derived efficiencies:",
+        f"- truth event -> reco signal candidate (step1 / truth): {eff_truth_to_label:.2f}%",
+        f"- reco signal -> calo-matched signal (step2 / step1):   {eff_label_to_calo:.2f}%",
+        f"- truth event -> final used signal (step3 / truth):     {eff_truth_to_final:.2f}%",
+        "",
+        "Cross-check notes:",
+        f"- truth-to-label difference (truth - step1): {n_lost_truth_to_label}",
+        f"- events used in train+val after candidate masking: {n_used_events}",
+        "=" * 70,
+    ]
+
+    chain_text = "\n".join(chain_lines)
+    print("\n" + chain_text + "\n")
+
+    with open(output_path, "w") as f:
+        f.write(chain_text + "\n")
 
 
 def train_model(X_df, y, truth_has_scattered_event=None):
@@ -464,23 +549,8 @@ def train_model(X_df, y, truth_has_scattered_event=None):
     val_mask = X_df["event_id"].isin(val_events).to_numpy()
 
     if truth_has_scattered_event is not None:
-        train_event_indices = np.asarray(train_events, dtype=int)
         val_event_indices = np.asarray(val_events, dtype=int)
-        train_truth_flags = truth_has_scattered_event[train_event_indices]
         val_truth_flags = truth_has_scattered_event[val_event_indices]
-        n_true_scattered_e_train = int(np.sum(train_truth_flags))
-        n_no_truth_scattered_train = int(np.sum(~train_truth_flags))
-
-        print(f"train events: {len(train_events)}")
-        print(
-            "true scattered electrons in train events "
-            "(same first-match logic as labels): "
-            f"{n_true_scattered_e_train}"
-        )
-        print(
-            "train events with no truth scattered electron found: "
-            f"{n_no_truth_scattered_train}"
-        )
     else:
         val_truth_flags = None
 
@@ -491,23 +561,6 @@ def train_model(X_df, y, truth_has_scattered_event=None):
     X_val = X[val_mask]
     y_train = y[train_mask]
     y_val = y[val_mask]
-
-    # Event-level label multiplicity diagnostics on the exact training sample.
-    train_event_ids_per_particle = X_df.loc[train_mask, "event_id"].to_numpy(dtype=int)
-    train_signal_event_ids = train_event_ids_per_particle[y_train == 1]
-    if train_signal_event_ids.size > 0:
-        signal_counts_per_event = pd.Series(train_signal_event_ids).value_counts()
-        n_events_with_signal = int(signal_counts_per_event.size)
-        n_events_with_multiple_signal = int((signal_counts_per_event > 1).sum())
-    else:
-        n_events_with_signal = 0
-        n_events_with_multiple_signal = 0
-    n_events_with_zero_signal = int(len(train_events) - n_events_with_signal)
-
-    print("train-event signal-label multiplicity after candidate masking:")
-    print(f"events with 0 signal candidate: {n_events_with_zero_signal}")
-    print(f"events with exactly 1 signal candidate: {len(train_events) - n_events_with_zero_signal - n_events_with_multiple_signal}")
-    print(f"events with >1 signal candidate: {n_events_with_multiple_signal}")
 
     event_info_df = X_df[["Q2", "x", "y", "event_id"]]
     event_info_val = event_info_df[val_mask].reset_index(drop=True)
@@ -577,7 +630,6 @@ def print_and_save_training_summary(
     ]
     
     summary_text = "\n".join(summary_lines)
-    print("\n" + summary_text + "\n")
     
     with open(output_path, "w") as f:
         f.write(summary_text + "\n")
@@ -783,7 +835,7 @@ def main():
     events = load_data(file_paths)
 
     print("Processing features...")
-    X_df, y, truth_has_scattered_event = process_features(
+    X_df, y, truth_has_scattered_event, efficiency_counts = process_features(
         events,
         p_tot,
         rot_y_angle,
@@ -842,6 +894,17 @@ def main():
         str(summary_out),
     )
     print(f"Saved training summary to {summary_out}")
+
+    efficiency_chain_out = model_out_path.with_name(f"{model_out_path.stem}_efficiency_chain.txt")
+    print_and_save_efficiency_chain(
+        efficiency_counts,
+        n_train_events,
+        n_val_events,
+        int(y_train.sum()),
+        int(y_val.sum()),
+        str(efficiency_chain_out),
+    )
+    print(f"Saved efficiency chain to {efficiency_chain_out}")
 
     print(f"Saving model to {model_out_path}...")
     model.save_model(str(model_out_path))
