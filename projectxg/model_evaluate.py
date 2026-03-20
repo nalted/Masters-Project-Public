@@ -481,28 +481,28 @@ def efficiency_purity_2d_q2x_event_level(
 
         for ix in range(n_x):
             x_lo, x_hi = x_bins[ix], x_bins[ix + 1]
-            in_bin_truth = q2_mask & (all_val_true_x >= x_lo) & (all_val_true_x < x_hi) & all_val_has_scattered
+            in_bin_kin = q2_mask & (all_val_true_x >= x_lo) & (all_val_true_x < x_hi)
 
-            n_truth_in_bin = int(np.sum(in_bin_truth))
-            if n_truth_in_bin <= 0:
+            n_total_in_bin = int(np.sum(in_bin_kin))
+            if n_total_in_bin <= 0:
                 continue
 
-            bin_event_ids = all_val_events[in_bin_truth]
-            tp_count = int(np.sum([pred_positive_lookup.get(int(evt), False) for evt in bin_event_ids]))
+            in_bin_truth = in_bin_kin & all_val_has_scattered
+            in_bin_background = in_bin_kin & (~all_val_has_scattered)
 
-            # For bin-purity, false positives are predicted-positive events that are
-            # either non-scattered or not in this truth kinematic bin.
-            fp_mask = all_val_pred_positive & ((~all_val_has_scattered) | (~in_bin_truth))
-            fp_count = int(np.sum(fp_mask))
+            n_truth_in_bin = int(np.sum(in_bin_truth))
+            tp_count = int(np.sum(all_val_pred_positive & in_bin_truth))
+            fp_count = int(np.sum(all_val_pred_positive & in_bin_background))
+            n_pred_in_bin = tp_count + fp_count
 
             n_truth_map[iq, ix] = n_truth_in_bin
-            n_pred_map[iq, ix] = tp_count + fp_count
-            n_tot_map[iq, ix] = int(np.sum(q2_mask & (all_val_true_x >= x_lo) & (all_val_true_x < x_hi)))
+            n_pred_map[iq, ix] = n_pred_in_bin
+            n_tot_map[iq, ix] = n_total_in_bin
 
             if n_truth_in_bin >= min_denom:
                 eff_map[iq, ix] = tp_count / n_truth_in_bin
-            if (tp_count + fp_count) >= min_denom:
-                pur_map[iq, ix] = tp_count / (tp_count + fp_count)
+            if n_pred_in_bin >= min_denom:
+                pur_map[iq, ix] = tp_count / n_pred_in_bin
 
     return {
         "q2_bins": q2_bins,

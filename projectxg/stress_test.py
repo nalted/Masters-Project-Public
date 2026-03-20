@@ -41,8 +41,42 @@ def resolve_threshold(args):
 
     if args.val_data is not None:
         val_payload = np.load(args.val_data)
-        y_val = np.asarray(val_payload["y_val"]).astype(int)
         val_pred = np.asarray(val_payload["val_pred"])
+        event_id_val = np.asarray(val_payload["event_id_val"]).astype(int) if "event_id_val" in val_payload.files else None
+
+        # Preferred path: total event-level thresholding from unfiltered validation events.
+        if all(k in val_payload.files for k in ["all_val_events", "all_val_has_scattered"]):
+            all_val_events = np.asarray(val_payload["all_val_events"]).astype(int)
+            all_val_has_scattered = np.asarray(val_payload["all_val_has_scattered"]).astype(int)
+
+            if event_id_val is not None:
+                max_score_lookup = {
+                    int(evt): float(np.max(val_pred[event_id_val == evt]))
+                    for evt in np.unique(event_id_val)
+                }
+                event_scores = np.asarray([max_score_lookup.get(int(evt), 0.0) for evt in all_val_events], dtype=float)
+                thr, best_f1 = compute_best_threshold(all_val_has_scattered, event_scores)
+                return thr, "val_data_max_f1_event_total", best_f1
+
+        # Fallback: represented event-level thresholding from validation arrays.
+        if (event_id_val is not None) and ("val_events" in val_payload.files):
+            val_events = np.asarray(val_payload["val_events"]).astype(int)
+            truth_flags = (
+                np.asarray(val_payload["truth_has_scattered_event_val"]).astype(bool)
+                if "truth_has_scattered_event_val" in val_payload.files
+                else None
+            )
+            if truth_flags is not None and (len(truth_flags) == len(val_events)):
+                max_score_lookup = {
+                    int(evt): float(np.max(val_pred[event_id_val == evt]))
+                    for evt in np.unique(event_id_val)
+                }
+                event_scores = np.asarray([max_score_lookup.get(int(evt), 0.0) for evt in val_events], dtype=float)
+                thr, best_f1 = compute_best_threshold(truth_flags.astype(int), event_scores)
+                return thr, "val_data_max_f1_event_represented", best_f1
+
+        # Legacy fallback for older validation files.
+        y_val = np.asarray(val_payload["y_val"]).astype(int)
         thr, best_f1 = compute_best_threshold(y_val, val_pred)
         return thr, "val_data_max_f1", best_f1
 
