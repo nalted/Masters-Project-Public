@@ -478,30 +478,53 @@ def main():
         all_true_q2 = np.asarray(ak.to_numpy(ak.fill_none(ak.firsts(events["InclusiveKinematicsTruth.Q2"]), 0.0)), dtype=float)
         all_true_x = np.asarray(ak.to_numpy(ak.fill_none(ak.firsts(events["InclusiveKinematicsTruth.x"]), 0.0)), dtype=float)
 
-        # Threshold-based plots require a concrete threshold and a displayable F1 value.
+        # Threshold-based plots require concrete thresholds for each granularity.
         if threshold is None:
             print("Skipped threshold-dependent plots because no threshold was resolved.")
             return
+
+        candidate_best_threshold, candidate_best_f1 = compute_best_threshold(y_true, scores)
+        event_best_threshold, event_best_f1 = compute_best_threshold(event_truth, event_scores)
+
+        # Keep reported threshold behavior unchanged, but use level-specific max-F1 settings for plots.
         if best_f1 is None:
-            _, best_f1 = compute_best_threshold(event_truth, event_scores)
+            best_f1 = event_best_f1
 
         model_evaluate.plot_feature_importance_avg_gain(
             model,
-            f"{plot_prefix}_importance_avg_gain.png",
+            f"{plot_prefix}_importance_avg_gain_candidate_level.png",
             plot_context="Stress Test",
         )
         model_evaluate.plot_feature_importance_total_gain(
             model,
-            f"{plot_prefix}_importance_total_gain.png",
+            f"{plot_prefix}_importance_total_gain_candidate_level.png",
             plot_context="Stress Test",
+        )
+        model_evaluate.plot_purity_efficiency_curve(
+            y_true,
+            scores,
+            candidate_best_threshold,
+            candidate_best_f1,
+            f"{plot_prefix}_purity_efficiency_bestf1_candidate_level.png",
+            plot_context="Candidate-Level",
         )
         model_evaluate.plot_purity_efficiency_curve(
             event_truth,
             event_scores,
-            threshold,
-            best_f1,
+            event_best_threshold,
+            event_best_f1,
             f"{plot_prefix}_purity_efficiency_bestf1_event_level.png",
-            plot_context="Stress Test (Event-level)",
+            plot_context="Event-Level",
+        )
+        model_evaluate.plot_2d_q2x_maps(
+            scores,
+            y_true,
+            q2,
+            x,
+            candidate_best_threshold,
+            candidate_best_f1,
+            f"{plot_prefix}_q2x_phase_space_candidate_level.png",
+            plot_context="Candidate-Level",
         )
         model_evaluate.plot_2d_q2x_maps_event_level(
             scores,
@@ -509,10 +532,10 @@ def main():
             event_ids,
             q2,
             x,
-            threshold,
-            best_f1,
+            event_best_threshold,
+            event_best_f1,
             f"{plot_prefix}_q2x_phase_space_event_level.png",
-            plot_context="Stress Test",
+            plot_context="Event-Level",
             truth_has_scattered_event_val=truth_flags_represented,
             val_events=represented_event_ids,
             all_val_events=all_event_ids,
@@ -524,24 +547,24 @@ def main():
             X,
             y_true,
             scores,
-            threshold,
-            f"{plot_prefix}_input_distributions_tp.png",
+            candidate_best_threshold,
+            f"{plot_prefix}_input_distributions_tp_candidate_level.png",
             plot_context="Stress Test",
         )
         model_evaluate.plot_input_distributions_tn(
             X,
             y_true,
             scores,
-            threshold,
-            f"{plot_prefix}_input_distributions_tn.png",
+            candidate_best_threshold,
+            f"{plot_prefix}_input_distributions_tn_candidate_level.png",
             plot_context="Stress Test",
         )
         model_evaluate.plot_input_distributions_fn(
             X,
             y_true,
             scores,
-            threshold,
-            f"{plot_prefix}_input_distributions_fn.png",
+            candidate_best_threshold,
+            f"{plot_prefix}_input_distributions_fn_candidate_level.png",
             plot_context="Stress Test",
         )
 
@@ -549,12 +572,12 @@ def main():
             plot_three_class_feature_distributions(
                 X_df,
                 y_true,
-                f"{plot_prefix}_input_distributions_3class.png",
+                f"{plot_prefix}_input_distributions_3class_candidate_level.png",
             )
             plot_isolation_cone_scan_three_class(
                 events,
                 args,
-                f"{plot_prefix}_isolation_cone_scan_3class.png",
+                f"{plot_prefix}_isolation_cone_scan_3class_candidate_level.png",
             )
         else:
             print("Skipped 3-class plots because truth_pdg/truth_gen columns are missing.")

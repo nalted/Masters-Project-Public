@@ -277,6 +277,50 @@ def compute_best_threshold(y_val, val_pred):
     return best_threshold, best_f1
 
 
+def build_event_level_pr_arrays(
+    event_id_val,
+    val_pred,
+    y_val,
+    truth_has_scattered_event_val=None,
+    val_events=None,
+    all_val_events=None,
+    all_val_has_scattered=None,
+):
+    if event_id_val is None:
+        raise ValueError("event_id_val is required to build event-level PR arrays")
+
+    event_id_val = np.asarray(event_id_val, dtype=int)
+    val_pred = np.asarray(val_pred, dtype=float)
+    y_val = np.asarray(y_val).astype(int)
+
+    represented_event_ids = np.asarray(np.unique(event_id_val), dtype=int)
+    event_score_lookup = {
+        int(evt): float(np.max(val_pred[event_id_val == evt]))
+        for evt in represented_event_ids
+    }
+
+    if (all_val_events is not None) and (all_val_has_scattered is not None):
+        all_val_events = np.asarray(all_val_events, dtype=int)
+        all_val_has_scattered = np.asarray(all_val_has_scattered, dtype=int)
+        event_scores = np.asarray(
+            [event_score_lookup.get(int(evt), 0.0) for evt in all_val_events],
+            dtype=float,
+        )
+        return all_val_has_scattered, event_scores, "all_val_has_scattered (unfiltered validation events)"
+
+    event_ids_for_metrics, event_truth, truth_source = _build_event_truth_flags(
+        event_id_val,
+        truth_has_scattered_event_val=truth_has_scattered_event_val,
+        val_events=val_events,
+        y_val=y_val,
+    )
+    event_scores = np.asarray(
+        [event_score_lookup.get(int(evt), 0.0) for evt in event_ids_for_metrics],
+        dtype=float,
+    )
+    return event_truth.astype(int), event_scores, truth_source
+
+
 def _plot_importance(model, output_path, importance_type, title, plot_context="Training"):
     score = model.get_booster().get_score(importance_type=importance_type)
 
@@ -291,7 +335,7 @@ def _plot_importance(model, output_path, importance_type, title, plot_context="T
     fig, ax = plt.subplots(figsize=(9, 5.5))
     ax.barh(sorted_labels, sorted_values, color="tab:blue", alpha=0.8)
     ax.set_xlabel(importance_type)
-    ax.set_title(f"{plot_context}: {title}")
+    ax.set_title(f"[Candidate-Level] {title} ({plot_context})")
     ax.grid(axis="x", alpha=0.3)
     plt.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -344,12 +388,16 @@ def plot_purity_efficiency_curve(y_val, val_pred, best_threshold, best_f1, outpu
     ax.axvline(best_recall, color="tab:red", ls="--", alpha=0.3)
     ax.set_xlabel("efficiency")
     ax.set_ylabel("purity")
-    ax.set_title(f"{plot_context}: Purity-Efficiency Curve with Best F1 Threshold")
+    ax.set_title(f"[{plot_context}] Precision-Recall Curve")
     ax.legend(loc="lower left")
     ax.grid(True, alpha=0.4)
     ax.set_xlim(0, 1.05)
     ax.set_ylim(0, 1.05)
-    plt.tight_layout()
+    fig.suptitle(
+        f"[{plot_context}] Precision-Recall (Threshold = {best_threshold:.3f}, F1 = {best_f1:.3f})",
+        fontsize=13,
+    )
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -553,7 +601,7 @@ def plot_2d_q2x_maps(
     ax1.set_yscale("log")
     ax1.set_xlabel("x")
     ax1.set_ylabel("Q2 (GeV^2)")
-    ax1.set_title(f"{plot_context}: Efficiency")
+    ax1.set_title("[Candidate-Level] Efficiency")
     cb1 = fig.colorbar(m1, ax=ax1)
     cb1.set_label("efficiency")
 
@@ -562,7 +610,7 @@ def plot_2d_q2x_maps(
     ax2.set_yscale("log")
     ax2.set_xlabel("x")
     ax2.set_ylabel("Q2 (GeV^2)")
-    ax2.set_title(f"{plot_context}: Purity")
+    ax2.set_title("[Candidate-Level] Purity")
     cb2 = fig.colorbar(m2, ax=ax2)
     cb2.set_label("purity")
 
@@ -580,7 +628,7 @@ def plot_2d_q2x_maps(
     ax3.set_yscale("log")
     ax3.set_xlabel("x")
     ax3.set_ylabel("Q2 (GeV^2)")
-    ax3.set_title(f"{plot_context}: Bin Density (N per Bin)")
+    ax3.set_title("[Candidate-Level] Bin Density (N per Bin)")
     cb3 = fig.colorbar(m3, ax=ax3)
     cb3.set_label("count per bin (log scale)")
 
@@ -616,8 +664,8 @@ def plot_2d_q2x_maps(
 
     fig.suptitle(
         (
-            f"{plot_context}: Candidate-level Q2-x Efficiency and Purity "
-            f"(threshold={best_threshold:.3f}, max F1={best_f1:.3f})"
+            "[Candidate-Level] Efficiency and Purity in Q2-x "
+            f"(Threshold = {best_threshold:.3f}, Candidate F1 = {best_f1:.3f})"
         ),
         fontsize=14,
     )
@@ -673,36 +721,26 @@ def plot_2d_q2x_maps_event_level(
     q2_bins = q2x["q2_bins"]
     x_bins = q2x["x_bins"]
     eff_2d = q2x["efficiency"]
-    pur_2d = q2x["purity"]
     n_tot_2d = q2x["n_total"]
     truth_source = q2x["truth_source"]
 
     q2_centers = np.sqrt(q2_bins[:-1] * q2_bins[1:])
     x_centers = np.sqrt(x_bins[:-1] * x_bins[1:])
 
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(22, 10), constrained_layout=True)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 8), constrained_layout=True)
 
     m1 = ax1.pcolormesh(x_bins, q2_bins, eff_2d, shading="auto", vmin=0.0, vmax=1.0, cmap="viridis")
     ax1.set_xscale("log")
     ax1.set_yscale("log")
     ax1.set_xlabel("x")
     ax1.set_ylabel("Q2 (GeV^2)")
-    ax1.set_title(f"{plot_context}: Event-level Efficiency")
+    ax1.set_title("[Event-Level] Total Event Efficiency")
     cb1 = fig.colorbar(m1, ax=ax1)
     cb1.set_label("efficiency")
 
-    m2 = ax2.pcolormesh(x_bins, q2_bins, pur_2d, shading="auto", vmin=0.0, vmax=1.0, cmap="magma")
-    ax2.set_xscale("log")
-    ax2.set_yscale("log")
-    ax2.set_xlabel("x")
-    ax2.set_ylabel("Q2 (GeV^2)")
-    ax2.set_title(f"{plot_context}: Event-level Purity")
-    cb2 = fig.colorbar(m2, ax=ax2)
-    cb2.set_label("purity")
-
     n_display = np.where(n_tot_2d > 0, n_tot_2d, np.nan)
     vmax = np.nanmax(n_display) if np.any(np.isfinite(n_display)) else 1.0
-    m3 = ax3.pcolormesh(
+    m2 = ax2.pcolormesh(
         x_bins,
         q2_bins,
         n_display,
@@ -710,13 +748,13 @@ def plot_2d_q2x_maps_event_level(
         cmap="cividis",
         norm=LogNorm(vmin=1, vmax=max(vmax, 1.0)),
     )
-    ax3.set_xscale("log")
-    ax3.set_yscale("log")
-    ax3.set_xlabel("x")
-    ax3.set_ylabel("Q2 (GeV^2)")
-    ax3.set_title(f"{plot_context}: Event Density (N events per bin)")
-    cb3 = fig.colorbar(m3, ax=ax3)
-    cb3.set_label("event count per bin (log scale)")
+    ax2.set_xscale("log")
+    ax2.set_yscale("log")
+    ax2.set_xlabel("x")
+    ax2.set_ylabel("Q2 (GeV^2)")
+    ax2.set_title("[Event-Level] Event Density (N events per bin)")
+    cb2 = fig.colorbar(m2, ax=ax2)
+    cb2.set_label("event count per bin (log scale)")
 
     for iq, q2c in enumerate(q2_centers):
         for ix, xc in enumerate(x_centers):
@@ -724,8 +762,6 @@ def plot_2d_q2x_maps_event_level(
                 continue
 
             eff_val = eff_2d[iq, ix]
-            pur_val = pur_2d[iq, ix]
-
             if np.isfinite(eff_val):
                 ax1.text(
                     xc,
@@ -737,21 +773,10 @@ def plot_2d_q2x_maps_event_level(
                     color="white" if eff_val < 0.55 else "black",
                 )
 
-            if np.isfinite(pur_val):
-                ax2.text(
-                    xc,
-                    q2c,
-                    f"{pur_val:.2f}",
-                    ha="center",
-                    va="center",
-                    fontsize=7,
-                    color="white" if pur_val < 0.55 else "black",
-                )
-
     fig.suptitle(
         (
-            f"{plot_context}: Total Event Efficiency (epsilon_total) and Purity in Q2-x "
-            f"(threshold={best_threshold:.3f}, max F1={best_f1:.3f}, truth={truth_source})"
+            "[Event-Level] Total Efficiency in Q2-x "
+            f"(Threshold = {best_threshold:.3f}, Event F1 = {best_f1:.3f}, truth = {truth_source})"
         ),
         fontsize=14,
     )
@@ -816,7 +841,7 @@ def plot_input_distributions_tp(X_val, y_val, val_pred, best_threshold, output_p
             label="Predicted Scattered Electron",
         )
 
-        axes[i].set_title(f"TP Input Variable: {feature} (threshold > {best_threshold:.2f})")
+        axes[i].set_title(f"[Candidate-Level] TP: {feature} (threshold > {best_threshold:.2f})")
         axes[i].set_xlabel(feature)
         axes[i].set_ylabel("Number of particles")
         if feature == "is_leading_pt":
@@ -828,7 +853,10 @@ def plot_input_distributions_tp(X_val, y_val, val_pred, best_threshold, output_p
         axes[i].legend(loc="upper right")
         axes[i].grid(True, alpha=0.3)
 
-    fig.suptitle(f"{plot_context}: TP Input Variable Distributions", fontsize=14)
+    fig.suptitle(
+        f"[Candidate-Level] Input Distributions (TP) ({plot_context}, Threshold = {best_threshold:.3f})",
+        fontsize=14,
+    )
     plt.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -865,7 +893,7 @@ def plot_input_distributions_tn(X_val, y_val, val_pred, best_threshold, output_p
             label="Predicted Background",
         )
 
-        axes[i].set_title(f"TN Input Variable: {feature} (threshold <= {best_threshold:.2f})")
+        axes[i].set_title(f"[Candidate-Level] TN: {feature} (threshold <= {best_threshold:.2f})")
         axes[i].set_xlabel(feature)
         axes[i].set_ylabel("Number of particles")
         if feature == "is_leading_pt":
@@ -877,7 +905,10 @@ def plot_input_distributions_tn(X_val, y_val, val_pred, best_threshold, output_p
         axes[i].legend(loc="upper right")
         axes[i].grid(True, alpha=0.3)
 
-    fig.suptitle(f"{plot_context}: TN Input Variable Distributions", fontsize=14)
+    fig.suptitle(
+        f"[Candidate-Level] Input Distributions (TN) ({plot_context}, Threshold = {best_threshold:.3f})",
+        fontsize=14,
+    )
     plt.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -915,7 +946,7 @@ def plot_input_distributions_fn(X_val, y_val, val_pred, best_threshold, output_p
             label="Missed Scattered Electrons (FN)",
         )
 
-        axes[i].set_title(f"FN Input Variable: {feature} (threshold <= {best_threshold:.2f})")
+        axes[i].set_title(f"[Candidate-Level] FN: {feature} (threshold <= {best_threshold:.2f})")
         axes[i].set_xlabel(feature)
         axes[i].set_ylabel("Number of particles")
         if feature == "is_leading_pt":
@@ -928,7 +959,10 @@ def plot_input_distributions_fn(X_val, y_val, val_pred, best_threshold, output_p
         axes[i].legend(loc="upper right")
         axes[i].grid(True, alpha=0.3)
 
-    fig.suptitle(f"{plot_context}: FN Input Variable Distributions", fontsize=14)
+    fig.suptitle(
+        f"[Candidate-Level] Input Distributions (FN) ({plot_context}, Threshold = {best_threshold:.3f})",
+        fontsize=14,
+    )
     plt.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -980,14 +1014,14 @@ def plot_input_distributions_three_class(X_df, y_true, output_path, plot_context
             label="background",
         )
 
-        axes[i].set_title(f"{plot_context}: {feature} Distribution")
+        axes[i].set_title(f"[Candidate-Level] {feature} Distribution")
         axes[i].set_xlabel(feature)
         axes[i].set_ylabel("Number of particles")
         axes[i].legend(loc="upper right")
         axes[i].grid(True, alpha=0.3)
 
     fig.suptitle(
-        f"{plot_context}: Input Variable Distributions (all, scattered electron, background)",
+        f"[Candidate-Level] Input Distributions (all, scattered electron, background) ({plot_context})",
         fontsize=14,
     )
     plt.tight_layout()
@@ -1042,8 +1076,22 @@ def main():
         raise ValueError("Length mismatch between y_val and val_pred in validation npz")
 
     best_threshold, best_f1 = compute_best_threshold(y_val, val_pred)
-    print(f"Maximum F1 Score: {best_f1:.4f}")
-    print(f"Optimal Threshold: {best_threshold:.4f}")
+    print(f"[Candidate-Level] Maximum F1 Score: {best_f1:.4f}")
+    print(f"[Candidate-Level] Optimal Threshold: {best_threshold:.4f}")
+
+    event_y_true, event_scores, event_truth_source = build_event_level_pr_arrays(
+        event_id_val=event_id_val,
+        val_pred=val_pred,
+        y_val=y_val,
+        truth_has_scattered_event_val=truth_has_scattered_event_val,
+        val_events=val_events,
+        all_val_events=all_val_events,
+        all_val_has_scattered=all_val_has_scattered,
+    )
+    event_best_threshold, event_best_f1 = compute_best_threshold(event_y_true, event_scores)
+    print(f"[Event-Level] Maximum F1 Score: {event_best_f1:.4f}")
+    print(f"[Event-Level] Optimal Threshold: {event_best_threshold:.4f}")
+    print(f"[Event-Level] Truth source for PR/threshold: {event_truth_source}")
 
     print_validation_truth_consistency(
         y_val,
@@ -1056,23 +1104,39 @@ def main():
         y_val,
         val_pred,
         event_id_val,
-        best_threshold,
+        event_best_threshold,
         truth_has_scattered_event_val=truth_has_scattered_event_val,
         val_events=val_events,
         all_val_events=all_val_events,
         all_val_has_scattered=all_val_has_scattered,
     )
-    print_event_level_metrics(event_metrics, best_threshold)
+    print_event_level_metrics(event_metrics, event_best_threshold)
 
-    plot_feature_importance_avg_gain(model, f"{output_prefix}_importance_avg_gain.png", plot_context="Training")
-    plot_feature_importance_total_gain(model, f"{output_prefix}_importance_total_gain.png", plot_context="Training")
+    plot_feature_importance_avg_gain(
+        model,
+        f"{output_prefix}_importance_avg_gain_candidate_level.png",
+        plot_context="Training",
+    )
+    plot_feature_importance_total_gain(
+        model,
+        f"{output_prefix}_importance_total_gain_candidate_level.png",
+        plot_context="Training",
+    )
     plot_purity_efficiency_curve(
         y_val,
         val_pred,
         best_threshold,
         best_f1,
-        f"{output_prefix}_purity_efficiency_bestf1.png",
-        plot_context="Training",
+        f"{output_prefix}_purity_efficiency_bestf1_candidate_level.png",
+        plot_context="Candidate-Level",
+    )
+    plot_purity_efficiency_curve(
+        event_y_true,
+        event_scores,
+        event_best_threshold,
+        event_best_f1,
+        f"{output_prefix}_purity_efficiency_bestf1_event_level.png",
+        plot_context="Event-Level",
     )
     plot_2d_q2x_maps(
         val_pred,
@@ -1082,7 +1146,7 @@ def main():
         best_threshold,
         best_f1,
         f"{output_prefix}_q2x_phase_space_candidate_level.png",
-        plot_context="Training",
+        plot_context="Candidate-Level",
     )
     plot_2d_q2x_maps_event_level(
         val_pred,
@@ -1090,10 +1154,10 @@ def main():
         event_id_val,
         event_Q2,
         event_x,
-        best_threshold,
-        best_f1,
+        event_best_threshold,
+        event_best_f1,
         f"{output_prefix}_q2x_phase_space_event_level.png",
-        plot_context="Training",
+        plot_context="Event-Level",
         truth_has_scattered_event_val=truth_has_scattered_event_val,
         val_events=val_events,
         all_val_events=all_val_events,
@@ -1106,7 +1170,7 @@ def main():
         y_val,
         val_pred,
         best_threshold,
-        f"{output_prefix}_input_distributions_tp.png",
+        f"{output_prefix}_input_distributions_tp_candidate_level.png",
         plot_context="Training",
     )
     plot_input_distributions_tn(
@@ -1114,7 +1178,7 @@ def main():
         y_val,
         val_pred,
         best_threshold,
-        f"{output_prefix}_input_distributions_tn.png",
+        f"{output_prefix}_input_distributions_tn_candidate_level.png",
         plot_context="Training",
     )
     plot_input_distributions_fn(
@@ -1122,7 +1186,7 @@ def main():
         y_val,
         val_pred,
         best_threshold,
-        f"{output_prefix}_input_distributions_fn.png",
+        f"{output_prefix}_input_distributions_fn_candidate_level.png",
         plot_context="Training",
     )
 
