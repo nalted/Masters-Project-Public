@@ -7,6 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import awkward as ak
 import model_evaluate
 from sklearn.metrics import average_precision_score, roc_auc_score, precision_recall_curve
 from xgboost import XGBClassifier
@@ -78,22 +79,19 @@ def build_three_class_masks(x_df, y_true):
     return all_mask, scattered_e_mask, hfs_mask
 
 
-def build_event_level_arrays(event_ids, scores, truth_flags_represented):
+def build_event_level_arrays(event_ids, scores, all_event_ids, all_event_truth):
     event_ids = np.asarray(event_ids).astype(int)
     scores = np.asarray(scores, dtype=float)
+    all_event_ids = np.asarray(all_event_ids, dtype=int)
+    all_event_truth = np.asarray(all_event_truth, dtype=bool)
 
-    unique_event_ids = np.asarray(np.unique(event_ids), dtype=int)
-    event_scores = np.asarray(
-        [np.max(scores[event_ids == evt]) for evt in unique_event_ids],
-        dtype=float,
-    )
-
-    truth_lookup = {
-        int(evt): bool(flag)
-        for evt, flag in truth_flags_represented.items()
+    max_score_lookup = {
+        int(evt): float(np.max(scores[event_ids == evt]))
+        for evt in np.unique(event_ids)
     }
-    event_truth = np.asarray([truth_lookup.get(int(evt), False) for evt in unique_event_ids], dtype=int)
-    return unique_event_ids, event_scores, event_truth
+    event_scores = np.asarray([max_score_lookup.get(int(evt), 0.0) for evt in all_event_ids], dtype=float)
+    event_truth = all_event_truth.astype(int)
+    return all_event_ids, event_scores, event_truth
 
 
 def shared_bins(values_a, values_b, values_c, feature_name):
@@ -287,18 +285,18 @@ def main():
     n_true_scattered_events_represented = int(np.sum(truth_flags_represented))
     n_events_no_truth_scattered = int(np.sum(~truth_flags_represented))
 
+    all_event_ids = np.arange(len(truth_has_scattered_event), dtype=int)
+    all_event_truth = np.asarray(truth_has_scattered_event, dtype=bool)
+
     X = np.asarray(X_df[mt.FEATURE_COLUMNS])
     scores = model.predict_proba(X)[:, 1]
 
     event_ids = X_df["event_id"].to_numpy().astype(int)
-    truth_flag_map = {
-        int(evt): bool(flag)
-        for evt, flag in zip(represented_event_ids, truth_flags_represented)
-    }
     unique_event_ids, event_scores, event_truth = build_event_level_arrays(
         event_ids,
         scores,
-        truth_flag_map,
+        all_event_ids,
+        all_event_truth,
     )
 
     if (threshold is None) and (len(np.unique(event_truth)) == 2):
@@ -332,6 +330,8 @@ def main():
             best_threshold=threshold,
             truth_has_scattered_event_val=truth_flags_represented,
             val_events=represented_event_ids,
+            all_val_events=all_event_ids,
+            all_val_has_scattered=all_event_truth,
         )
         event_efficiency = float(event_metrics["event_efficiency"])
         event_purity = float(event_metrics["event_purity"])
@@ -441,6 +441,8 @@ def main():
 
         q2 = X_df["Q2"].to_numpy()
         x = X_df["x"].to_numpy()
+        all_true_q2 = np.asarray(ak.to_numpy(ak.fill_none(ak.firsts(events["InclusiveKinematicsTruth.Q2"]), 0.0)), dtype=float)
+        all_true_x = np.asarray(ak.to_numpy(ak.fill_none(ak.firsts(events["InclusiveKinematicsTruth.x"]), 0.0)), dtype=float)
 
         # Threshold-based plots require a concrete threshold and a displayable F1 value.
         if threshold is None:
@@ -479,6 +481,10 @@ def main():
             plot_context="Stress Test",
             truth_has_scattered_event_val=truth_flags_represented,
             val_events=represented_event_ids,
+            all_val_events=all_event_ids,
+            all_val_true_q2=all_true_q2,
+            all_val_true_x=all_true_x,
+            all_val_has_scattered=all_event_truth,
         )
         model_evaluate.plot_input_distributions_tp(
             X,

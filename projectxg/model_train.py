@@ -543,7 +543,13 @@ def print_and_save_efficiency_chain(
 
 def train_model(X_df, y, truth_has_scattered_event=None):
     unique_events = X_df["event_id"].unique()
-    train_events, val_events = train_test_split(unique_events, test_size=0.2, random_state=42)
+    if truth_has_scattered_event is not None:
+        # Split on all raw events so validation can include events that produced no kept candidates.
+        all_events = np.arange(len(truth_has_scattered_event), dtype=int)
+    else:
+        all_events = np.asarray(unique_events, dtype=int)
+
+    train_events, val_events = train_test_split(all_events, test_size=0.2, random_state=42)
 
     train_mask = X_df["event_id"].isin(train_events).to_numpy()
     val_mask = X_df["event_id"].isin(val_events).to_numpy()
@@ -845,6 +851,11 @@ def main():
         signal_generator_statuses=args.signal_generator_statuses,
     )
 
+    # True event-level kinematics for the full, unfiltered event sample.
+    all_event_ids = np.arange(len(events), dtype=int)
+    all_true_q2 = ak.to_numpy(ak.fill_none(ak.firsts(events["InclusiveKinematicsTruth.Q2"]), 0.0))
+    all_true_x = ak.to_numpy(ak.fill_none(ak.firsts(events["InclusiveKinematicsTruth.x"]), 0.0))
+
     tag = naming_tag(args.campaign_tag, args.beam_electrons, args.beam_protons)
     model_out_path = Path(args.model_out)
     model_out_path = model_out_path.with_name(f"{model_out_path.stem}_{tag}{model_out_path.suffix}")
@@ -923,6 +934,14 @@ def main():
         truth_has_scattered_event_val=(
             np.asarray(val_truth_flags, dtype=bool)
             if val_truth_flags is not None
+            else np.asarray([], dtype=bool)
+        ),
+        all_val_events=val_events,
+        all_val_true_q2=all_true_q2[val_events],
+        all_val_true_x=all_true_x[val_events],
+        all_val_has_scattered=(
+            np.asarray(truth_has_scattered_event[val_events], dtype=bool)
+            if truth_has_scattered_event is not None
             else np.asarray([], dtype=bool)
         ),
         feature_names=np.asarray(FEATURE_COLUMNS),

@@ -53,6 +53,14 @@ def load_validation_data(npz_path):
         else None
     )
     val_events = np.asarray(data["val_events"]).astype(int) if "val_events" in data.files else None
+    all_val_events = np.asarray(data["all_val_events"]).astype(int) if "all_val_events" in data.files else None
+    all_val_true_q2 = np.asarray(data["all_val_true_q2"]) if "all_val_true_q2" in data.files else None
+    all_val_true_x = np.asarray(data["all_val_true_x"]) if "all_val_true_x" in data.files else None
+    all_val_has_scattered = (
+        np.asarray(data["all_val_has_scattered"]).astype(bool)
+        if "all_val_has_scattered" in data.files
+        else None
+    )
 
     return (
         X_val,
@@ -64,10 +72,14 @@ def load_validation_data(npz_path):
         event_id_val,
         truth_has_scattered_event_val,
         val_events,
+        all_val_events,
+        all_val_true_q2,
+        all_val_true_x,
+        all_val_has_scattered,
     )
 
 
-def print_validation_truth_consistency(y_val, event_id_val=None, truth_has_scattered_event_val=None):
+def print_validation_truth_consistency(y_val, event_id_val=None, truth_has_scattered_event_val=None, val_events=None):
     if event_id_val is None:
         print(
             "Validation truth-consistency diagnostics unavailable: "
@@ -79,7 +91,8 @@ def print_validation_truth_consistency(y_val, event_id_val=None, truth_has_scatt
     y_val = np.asarray(y_val).astype(int)
 
     unique_events = np.unique(event_id_val)
-    n_val_events = int(unique_events.size)
+    n_val_events_represented = int(unique_events.size)
+    n_val_events_total = int(len(val_events)) if val_events is not None else n_val_events_represented
 
     val_signal_event_ids = event_id_val[y_val == 1]
     if val_signal_event_ids.size > 0:
@@ -93,19 +106,19 @@ def print_validation_truth_consistency(y_val, event_id_val=None, truth_has_scatt
         n_events_with_signal = 0
         n_events_with_multiple_signal = 0
 
-    n_events_with_zero_signal = int(n_val_events - n_events_with_signal)
+    n_events_with_zero_signal = int(n_val_events_represented - n_events_with_signal)
 
     print("validation-event signal-label multiplicity after candidate masking:")
     print(f"events with 0 signal candidate: {n_events_with_zero_signal}")
     print(
         "events with exactly 1 signal candidate: "
-        f"{n_val_events - n_events_with_zero_signal - n_events_with_multiple_signal}"
+        f"{n_val_events_represented - n_events_with_zero_signal - n_events_with_multiple_signal}"
     )
     print(f"events with >1 signal candidate: {n_events_with_multiple_signal}")
 
     if truth_has_scattered_event_val is not None:
         truth_has_scattered_event_val = np.asarray(truth_has_scattered_event_val).astype(bool)
-        if truth_has_scattered_event_val.shape[0] != n_val_events:
+        if truth_has_scattered_event_val.shape[0] != n_val_events_total:
             print(
                 "Validation truth-consistency warning: "
                 "truth_has_scattered_event_val length does not match number of validation events."
@@ -114,7 +127,8 @@ def print_validation_truth_consistency(y_val, event_id_val=None, truth_has_scatt
 
         n_true_scattered_events = int(np.sum(truth_has_scattered_event_val))
         n_missing_truth = int(np.sum(~truth_has_scattered_event_val))
-        print(f"validation events: {n_val_events}")
+        print(f"validation events represented after candidate masking: {n_val_events_represented}")
+        print(f"validation events total (including filtered-out): {n_val_events_total}")
         print(
             "true scattered electrons in validation events "
             "(same first-match logic as labels): "
@@ -162,6 +176,8 @@ def compute_event_level_metrics(
     best_threshold,
     truth_has_scattered_event_val=None,
     val_events=None,
+    all_val_events=None,
+    all_val_has_scattered=None,
 ):
     if event_id_val is None:
         return None
@@ -170,21 +186,30 @@ def compute_event_level_metrics(
     y_val = np.asarray(y_val).astype(int)
     val_pred = np.asarray(val_pred, dtype=float)
 
-    unique_event_ids = np.asarray(np.unique(event_id_val), dtype=int)
+    represented_event_ids = np.asarray(np.unique(event_id_val), dtype=int)
+    event_pred_positive_lookup = {
+        int(evt): bool(np.any(val_pred[event_id_val == evt] > best_threshold))
+        for evt in represented_event_ids
+    }
+
+    if (all_val_events is not None) and (all_val_has_scattered is not None):
+        all_val_events = np.asarray(all_val_events, dtype=int)
+        all_val_has_scattered = np.asarray(all_val_has_scattered, dtype=bool)
+        event_ids_for_metrics = all_val_events
+        event_truth = all_val_has_scattered
+        truth_source = "all_val_has_scattered (unfiltered validation events)"
+    else:
+        event_ids_for_metrics, event_truth, truth_source = _build_event_truth_flags(
+            event_id_val,
+            truth_has_scattered_event_val=truth_has_scattered_event_val,
+            val_events=val_events,
+            y_val=y_val,
+        )
+
     event_pred_positive = np.asarray(
-        [np.any(val_pred[event_id_val == evt] > best_threshold) for evt in unique_event_ids],
+        [event_pred_positive_lookup.get(int(evt), False) for evt in event_ids_for_metrics],
         dtype=bool,
     )
-
-    truth_event_ids, event_truth, truth_source = _build_event_truth_flags(
-        event_id_val,
-        truth_has_scattered_event_val=truth_has_scattered_event_val,
-        val_events=val_events,
-        y_val=y_val,
-    )
-
-    if not np.array_equal(unique_event_ids, truth_event_ids):
-        raise ValueError("Internal event-id alignment error while computing event-level metrics")
 
     tp = int(np.sum(event_truth & event_pred_positive))
     fp = int(np.sum((~event_truth) & event_pred_positive))
@@ -195,7 +220,7 @@ def compute_event_level_metrics(
     event_purity = (tp / (tp + fp)) if (tp + fp) > 0 else 0.0
 
     return {
-        "n_events_total": int(unique_event_ids.size),
+        "n_events_total": int(len(event_ids_for_metrics)),
         "n_truth_scattered_events": int(np.sum(event_truth)),
         "n_predicted_scattered_events": int(np.sum(event_pred_positive)),
         "n_events_predicted_none": int(np.sum(~event_pred_positive)),
@@ -402,18 +427,19 @@ def efficiency_purity_2d_q2x(
 def efficiency_purity_2d_q2x_event_level(
     val_pred,
     event_id_val,
-    event_q2,
-    event_x,
+    all_val_events,
+    all_val_true_q2,
+    all_val_true_x,
+    all_val_has_scattered,
     threshold=0.5,
-    truth_has_scattered_event_val=None,
-    val_events=None,
-    y_val=None,
     q2_bins=None,
     x_bins=None,
     min_denom=1,
 ):
     if event_id_val is None:
         raise ValueError("event_id_val is required for event-level Q2-x maps")
+    if any(v is None for v in [all_val_events, all_val_true_q2, all_val_true_x, all_val_has_scattered]):
+        raise ValueError("all_val_* arrays are required for total event-level Q2-x maps")
 
     if q2_bins is None:
         q2_bins = np.geomspace(1.0, 100.0, 10)
@@ -421,29 +447,23 @@ def efficiency_purity_2d_q2x_event_level(
         x_bins = np.geomspace(1e-4, 1.0, 20)
 
     event_id_val = np.asarray(event_id_val).astype(int)
-    event_q2 = np.asarray(event_q2, dtype=float)
-    event_x = np.asarray(event_x, dtype=float)
+    all_val_events = np.asarray(all_val_events, dtype=int)
+    all_val_true_q2 = np.asarray(all_val_true_q2, dtype=float)
+    all_val_true_x = np.asarray(all_val_true_x, dtype=float)
+    all_val_has_scattered = np.asarray(all_val_has_scattered, dtype=bool)
     val_pred = np.asarray(val_pred, dtype=float)
 
-    unique_event_ids = np.asarray(np.unique(event_id_val), dtype=int)
-    event_pred_positive = np.asarray(
-        [np.any(val_pred[event_id_val == evt] > threshold) for evt in unique_event_ids],
-        dtype=bool,
-    )
-    event_q2_unique = np.asarray(
-        [event_q2[np.where(event_id_val == evt)[0][0]] for evt in unique_event_ids],
-        dtype=float,
-    )
-    event_x_unique = np.asarray(
-        [event_x[np.where(event_id_val == evt)[0][0]] for evt in unique_event_ids],
-        dtype=float,
-    )
+    # Build event-level prediction lookup from candidate-level scores.
+    represented_event_ids = np.asarray(np.unique(event_id_val), dtype=int)
+    pred_positive_lookup = {
+        int(evt): bool(np.any(val_pred[event_id_val == evt] > threshold))
+        for evt in represented_event_ids
+    }
 
-    _, event_truth, truth_source = _build_event_truth_flags(
-        event_id_val,
-        truth_has_scattered_event_val=truth_has_scattered_event_val,
-        val_events=val_events,
-        y_val=y_val,
+    # Prediction status for all validation events (including those with no kept candidates).
+    all_val_pred_positive = np.asarray(
+        [pred_positive_lookup.get(int(evt), False) for evt in all_val_events],
+        dtype=bool,
     )
 
     n_q2 = len(q2_bins) - 1
@@ -457,33 +477,32 @@ def efficiency_purity_2d_q2x_event_level(
 
     for iq in range(n_q2):
         q2_lo, q2_hi = q2_bins[iq], q2_bins[iq + 1]
-        q2_mask = (event_q2_unique >= q2_lo) & (event_q2_unique < q2_hi)
+        q2_mask = (all_val_true_q2 >= q2_lo) & (all_val_true_q2 < q2_hi)
 
         for ix in range(n_x):
             x_lo, x_hi = x_bins[ix], x_bins[ix + 1]
-            in_bin = q2_mask & (event_x_unique >= x_lo) & (event_x_unique < x_hi)
+            in_bin_truth = q2_mask & (all_val_true_x >= x_lo) & (all_val_true_x < x_hi) & all_val_has_scattered
 
-            if not np.any(in_bin):
+            n_truth_in_bin = int(np.sum(in_bin_truth))
+            if n_truth_in_bin <= 0:
                 continue
 
-            truth_bin = event_truth[in_bin]
-            pred_bin = event_pred_positive[in_bin]
+            bin_event_ids = all_val_events[in_bin_truth]
+            tp_count = int(np.sum([pred_positive_lookup.get(int(evt), False) for evt in bin_event_ids]))
 
-            tp = np.sum(truth_bin & pred_bin)
-            fp = np.sum((~truth_bin) & pred_bin)
-            fn = np.sum(truth_bin & (~pred_bin))
+            # For bin-purity, false positives are predicted-positive events that are
+            # either non-scattered or not in this truth kinematic bin.
+            fp_mask = all_val_pred_positive & ((~all_val_has_scattered) | (~in_bin_truth))
+            fp_count = int(np.sum(fp_mask))
 
-            n_truth = tp + fn
-            n_pred = tp + fp
+            n_truth_map[iq, ix] = n_truth_in_bin
+            n_pred_map[iq, ix] = tp_count + fp_count
+            n_tot_map[iq, ix] = int(np.sum(q2_mask & (all_val_true_x >= x_lo) & (all_val_true_x < x_hi)))
 
-            n_truth_map[iq, ix] = int(n_truth)
-            n_pred_map[iq, ix] = int(n_pred)
-            n_tot_map[iq, ix] = int(np.sum(in_bin))
-
-            if n_truth >= min_denom:
-                eff_map[iq, ix] = tp / n_truth
-            if n_pred >= min_denom:
-                pur_map[iq, ix] = tp / n_pred
+            if n_truth_in_bin >= min_denom:
+                eff_map[iq, ix] = tp_count / n_truth_in_bin
+            if (tp_count + fp_count) >= min_denom:
+                pur_map[iq, ix] = tp_count / (tp_count + fp_count)
 
     return {
         "q2_bins": q2_bins,
@@ -493,7 +512,7 @@ def efficiency_purity_2d_q2x_event_level(
         "n_truth": n_truth_map,
         "n_predicted_signal": n_pred_map,
         "n_total": n_tot_map,
-        "truth_source": truth_source,
+        "truth_source": "all_val_has_scattered (unfiltered validation events)",
     }
 
 
@@ -618,20 +637,38 @@ def plot_2d_q2x_maps_event_level(
     plot_context="Training",
     truth_has_scattered_event_val=None,
     val_events=None,
+    all_val_events=None,
+    all_val_true_q2=None,
+    all_val_true_x=None,
+    all_val_has_scattered=None,
 ):
-    q2x = efficiency_purity_2d_q2x_event_level(
-        val_pred=val_pred,
-        event_id_val=event_id_val,
-        event_q2=event_q2,
-        event_x=event_x,
-        threshold=best_threshold,
-        truth_has_scattered_event_val=truth_has_scattered_event_val,
-        val_events=val_events,
-        y_val=y_val,
-        q2_bins=np.geomspace(1.0, 100.0, 10),
-        x_bins=np.geomspace(1e-4, 1.0, 20),
-        min_denom=1,
-    )
+    using_total_unfiltered = all(v is not None for v in [all_val_events, all_val_true_q2, all_val_true_x, all_val_has_scattered])
+    if using_total_unfiltered:
+        q2x = efficiency_purity_2d_q2x_event_level(
+            val_pred=val_pred,
+            event_id_val=event_id_val,
+            all_val_events=all_val_events,
+            all_val_true_q2=all_val_true_q2,
+            all_val_true_x=all_val_true_x,
+            all_val_has_scattered=all_val_has_scattered,
+            threshold=best_threshold,
+            q2_bins=np.geomspace(1.0, 100.0, 10),
+            x_bins=np.geomspace(1e-4, 1.0, 20),
+            min_denom=1,
+        )
+    else:
+        # Backward compatibility for older val npz without all_val_* arrays.
+        q2x = efficiency_purity_2d_q2x(
+            val_pred=val_pred,
+            y_true=y_val,
+            event_q2=event_q2,
+            event_x=event_x,
+            threshold=best_threshold,
+            q2_bins=np.geomspace(1.0, 100.0, 10),
+            x_bins=np.geomspace(1e-4, 1.0, 20),
+            min_denom=1,
+        )
+        q2x["truth_source"] = "fallback candidate-level bins (all_val_* unavailable)"
 
     q2_bins = q2x["q2_bins"]
     x_bins = q2x["x_bins"]
@@ -713,7 +750,7 @@ def plot_2d_q2x_maps_event_level(
 
     fig.suptitle(
         (
-            f"{plot_context}: Event-level Q2-x Efficiency and Purity "
+            f"{plot_context}: Total Event Efficiency (epsilon_total) and Purity in Q2-x "
             f"(threshold={best_threshold:.3f}, max F1={best_f1:.3f}, truth={truth_source})"
         ),
         fontsize=14,
@@ -995,6 +1032,10 @@ def main():
         event_id_val,
         truth_has_scattered_event_val,
         val_events,
+        all_val_events,
+        all_val_true_q2,
+        all_val_true_x,
+        all_val_has_scattered,
     ) = load_validation_data(args.val_data)
 
     if len(y_val) != len(val_pred):
@@ -1008,6 +1049,7 @@ def main():
         y_val,
         event_id_val=event_id_val,
         truth_has_scattered_event_val=truth_has_scattered_event_val,
+        val_events=val_events,
     )
 
     event_metrics = compute_event_level_metrics(
@@ -1017,6 +1059,8 @@ def main():
         best_threshold,
         truth_has_scattered_event_val=truth_has_scattered_event_val,
         val_events=val_events,
+        all_val_events=all_val_events,
+        all_val_has_scattered=all_val_has_scattered,
     )
     print_event_level_metrics(event_metrics, best_threshold)
 
@@ -1052,6 +1096,10 @@ def main():
         plot_context="Training",
         truth_has_scattered_event_val=truth_has_scattered_event_val,
         val_events=val_events,
+        all_val_events=all_val_events,
+        all_val_true_q2=all_val_true_q2,
+        all_val_true_x=all_val_true_x,
+        all_val_has_scattered=all_val_has_scattered,
     )
     plot_input_distributions_tp(
         X_val,
