@@ -415,12 +415,32 @@ def process_features(
         d_phi_self = ak.where(d_phi_self < -np.pi, d_phi_self + 2 * np.pi, d_phi_self)
         self_in_cone = cand_has_recoall & ((d_eta_self**2 + d_phi_self**2) < cone_size**2)
 
-        iso_other_total = iso_calo_total - ak.where(self_in_cone, cand_reco_E, 0.0)
+        # If MC mapping fails, fall back to a tight DeltaR self-match in the
+        # full reconstructed-particle list to avoid double counting candidate energy.
+        d_eta_fallback = all_reco_eta[:, None, :] - matched_calo_eta[:, :, None]
+        d_phi_fallback = all_reco_phi[:, None, :] - matched_calo_phi[:, :, None]
+        d_phi_fallback = ak.where(d_phi_fallback > np.pi, d_phi_fallback - 2 * np.pi, d_phi_fallback)
+        d_phi_fallback = ak.where(d_phi_fallback < -np.pi, d_phi_fallback + 2 * np.pi, d_phi_fallback)
+        fallback_self_mask = (d_eta_fallback**2 + d_phi_fallback**2) < (1e-4**2)
+        fallback_self_E = ak.sum(
+            ak.where(fallback_self_mask, all_reco_E[:, None, :], 0.0),
+            axis=-1,
+        )
+
+        self_subtract_E = ak.where(
+            cand_has_recoall,
+            ak.where(self_in_cone, cand_reco_E, 0.0),
+            fallback_self_E,
+        )
+
+        iso_other_total = iso_calo_total - self_subtract_E
         iso_other_total = ak.where(iso_other_total > 0, iso_other_total, 0.0)
 
+        total_cone_E = matched_calo_E + iso_other_total
+
         isolation_frac_by_cone[cone_size] = ak.where(
-            iso_other_total > 0,
-            matched_calo_E / iso_other_total,
+            total_cone_E > 0,
+            matched_calo_E / total_cone_E,
             0.0,
         )
 
