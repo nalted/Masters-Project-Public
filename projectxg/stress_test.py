@@ -23,6 +23,10 @@ def load_model(model_path):
 
 def compute_best_threshold(y_val, val_pred):
     precisions, recalls, thresholds = precision_recall_curve(y_val, val_pred)
+    if thresholds.size == 0:
+        # Degenerate case (e.g. constant scores): keep a neutral threshold.
+        return 0.5, 0.0
+
     precisions = precisions[:-1]
     recalls = recalls[:-1]
 
@@ -31,7 +35,10 @@ def compute_best_threshold(y_val, val_pred):
     valid = denom > 0
     f1_scores[valid] = 2.0 * (precisions[valid] * recalls[valid]) / denom[valid]
 
-    best_idx = int(np.argmax(f1_scores))
+    max_f1 = float(np.max(f1_scores))
+    # Match evaluate.py tie-break: pick the largest threshold among equal-best F1.
+    tied_best = np.flatnonzero(np.isclose(f1_scores, max_f1, rtol=1e-12, atol=1e-12))
+    best_idx = int(tied_best[-1]) if tied_best.size else int(np.argmax(f1_scores))
     return float(thresholds[best_idx]), float(f1_scores[best_idx])
 
 
@@ -42,40 +49,7 @@ def resolve_threshold(args):
     if args.val_data is not None:
         val_payload = np.load(args.val_data)
         val_pred = np.asarray(val_payload["val_pred"])
-        event_id_val = np.asarray(val_payload["event_id_val"]).astype(int) if "event_id_val" in val_payload.files else None
-
-        # Preferred path: total event-level thresholding from unfiltered validation events.
-        if all(k in val_payload.files for k in ["all_val_events", "all_val_has_scattered"]):
-            all_val_events = np.asarray(val_payload["all_val_events"]).astype(int)
-            all_val_has_scattered = np.asarray(val_payload["all_val_has_scattered"]).astype(int)
-
-            if event_id_val is not None:
-                max_score_lookup = {
-                    int(evt): float(np.max(val_pred[event_id_val == evt]))
-                    for evt in np.unique(event_id_val)
-                }
-                event_scores = np.asarray([max_score_lookup.get(int(evt), 0.0) for evt in all_val_events], dtype=float)
-                thr, best_f1 = compute_best_threshold(all_val_has_scattered, event_scores)
-                return thr, "val_data_max_f1_event_total", best_f1
-
-        # Fallback: represented event-level thresholding from validation arrays.
-        if (event_id_val is not None) and ("val_events" in val_payload.files):
-            val_events = np.asarray(val_payload["val_events"]).astype(int)
-            truth_flags = (
-                np.asarray(val_payload["truth_has_scattered_event_val"]).astype(bool)
-                if "truth_has_scattered_event_val" in val_payload.files
-                else None
-            )
-            if truth_flags is not None and (len(truth_flags) == len(val_events)):
-                max_score_lookup = {
-                    int(evt): float(np.max(val_pred[event_id_val == evt]))
-                    for evt in np.unique(event_id_val)
-                }
-                event_scores = np.asarray([max_score_lookup.get(int(evt), 0.0) for evt in val_events], dtype=float)
-                thr, best_f1 = compute_best_threshold(truth_flags.astype(int), event_scores)
-                return thr, "val_data_max_f1_event_represented", best_f1
-
-        # Legacy fallback for older validation files.
+        # Match evaluate.py: choose threshold from candidate-level validation labels/scores.
         y_val = np.asarray(val_payload["y_val"]).astype(int)
         thr, best_f1 = compute_best_threshold(y_val, val_pred)
         return thr, "val_data_max_f1", best_f1
@@ -235,7 +209,7 @@ def plot_isolation_cone_scan_three_class(events, args, output_path):
             color="tab:blue",
             label="background",
         )
-        ax.set_xlabel(r"$E_{calo}^{cand} / \Sigma E_{calo}^{cone}$")
+        ax.set_xlabel(r"$E_{calo}^{cand} / \Sigma E_{reco}^{cone}$")
         ax.set_ylabel("counts")
         ax.set_title(f"Stress Test: Isolation Fraction (cone={float(cone):g})")
         ax.grid(True, alpha=0.3)
@@ -298,7 +272,7 @@ def main():
     print(f"Loading stress data from {len(args.input_files)} files...")
     events = mt.load_data(args.input_files)
 
-    print("Building stress features with training-equivalent pipeline...")
+    print("Building stress features with training-equivalent pipeline (charged candidates, full reco event field for isolation)...")
     p_tot, rot_y_angle, rot_x_angle = mt.func.determine_boost(
         args.beam_electrons,
         args.beam_protons,
@@ -333,9 +307,11 @@ def main():
         all_event_truth,
     )
 
-    if (threshold is None) and (len(np.unique(event_truth)) == 2):
-        threshold, best_f1 = compute_best_threshold(event_truth, event_scores)
-        threshold_source = "stress_max_f1"
+    # Match evaluate.py thresholding: always derive from candidate-level labels/scores
+    # when user/val-data thresholds are not provided.
+    if threshold is None:
+        threshold, best_f1 = compute_best_threshold(y_true, scores)
+        threshold_source = "stress_max_f1_candidate"
 
     metrics = {}
     if len(np.unique(event_truth)) == 2:
@@ -349,11 +325,14 @@ def main():
     event_efficiency = None
     event_purity = None
     if threshold is not None:
-        selected_mask = scores > threshold
+        selected_mask = model_evaluate.build_top1_selected_mask(event_ids, scores, threshold)
         selected_count = int(np.sum(selected_mask))
         selected_fraction = float(np.mean(selected_mask))
 
-        selected_event_mask = event_scores > threshold
+        selected_event_mask = np.asarray(
+            [np.any(selected_mask[event_ids == evt]) for evt in unique_event_ids],
+            dtype=bool,
+        )
         selected_event_count = int(np.sum(selected_event_mask))
         selected_event_fraction = float(np.mean(selected_event_mask))
 
@@ -394,7 +373,7 @@ def main():
         out_df["score"] = scores
         out_df["y_true"] = y_true
         if threshold is not None:
-            out_df["pred_is_signal"] = (scores > threshold).astype(int)
+            out_df["pred_is_signal"] = selected_mask.astype(int)
         out_df.to_csv(csv_out, index=False)
         print(f"Saved per-particle CSV: {csv_out}")
 
@@ -483,12 +462,8 @@ def main():
             print("Skipped threshold-dependent plots because no threshold was resolved.")
             return
 
+        # Mirror evaluate.py: one threshold/F1 from candidate-level labels/scores.
         candidate_best_threshold, candidate_best_f1 = compute_best_threshold(y_true, scores)
-        event_best_threshold, event_best_f1 = compute_best_threshold(event_truth, event_scores)
-
-        # Keep reported threshold behavior unchanged, but use level-specific max-F1 settings for plots.
-        if best_f1 is None:
-            best_f1 = event_best_f1
 
         model_evaluate.plot_feature_importance_avg_gain(
             model,
@@ -508,14 +483,6 @@ def main():
             f"{plot_prefix}_purity_efficiency_bestf1_candidate_level.png",
             plot_context="Candidate-Level",
         )
-        model_evaluate.plot_purity_efficiency_curve(
-            event_truth,
-            event_scores,
-            event_best_threshold,
-            event_best_f1,
-            f"{plot_prefix}_purity_efficiency_bestf1_event_level.png",
-            plot_context="Event-Level",
-        )
         model_evaluate.plot_2d_q2x_maps(
             scores,
             y_true,
@@ -532,8 +499,8 @@ def main():
             event_ids,
             q2,
             x,
-            event_best_threshold,
-            event_best_f1,
+            candidate_best_threshold,
+            candidate_best_f1,
             f"{plot_prefix}_q2x_phase_space_event_level.png",
             plot_context="Event-Level",
             truth_has_scattered_event_val=truth_flags_represented,
@@ -550,6 +517,7 @@ def main():
             candidate_best_threshold,
             f"{plot_prefix}_input_distributions_tp_candidate_level.png",
             plot_context="Stress Test",
+            event_id_val=event_ids,
         )
         model_evaluate.plot_input_distributions_tn(
             X,
@@ -558,6 +526,7 @@ def main():
             candidate_best_threshold,
             f"{plot_prefix}_input_distributions_tn_candidate_level.png",
             plot_context="Stress Test",
+            event_id_val=event_ids,
         )
         model_evaluate.plot_input_distributions_fn(
             X,
@@ -566,6 +535,7 @@ def main():
             candidate_best_threshold,
             f"{plot_prefix}_input_distributions_fn_candidate_level.png",
             plot_context="Stress Test",
+            event_id_val=event_ids,
         )
 
         if ("truth_pdg" in X_df.columns) and ("truth_gen" in X_df.columns):

@@ -169,6 +169,33 @@ def _build_event_truth_flags(event_ids, truth_has_scattered_event_val=None, val_
     raise ValueError("Unable to build event-level truth flags: missing required arrays")
 
 
+def build_top1_selected_mask(event_ids, scores, threshold):
+    """Select at most one predicted scattered-electron candidate per event.
+
+    For each event, this keeps only the candidate with the maximum score,
+    and marks it selected only if that maximum is above ``threshold``.
+    Ties are resolved by ``np.argmax`` (first occurrence).
+    """
+    event_ids = np.asarray(event_ids).astype(int)
+    scores = np.asarray(scores, dtype=float)
+
+    if event_ids.shape[0] != scores.shape[0]:
+        raise ValueError("Length mismatch between event_ids and scores")
+
+    selected_mask = np.zeros(scores.shape[0], dtype=bool)
+    if scores.size == 0:
+        return selected_mask
+
+    for evt in np.unique(event_ids):
+        idx = np.flatnonzero(event_ids == evt)
+        evt_scores = scores[idx]
+        best_local = int(np.argmax(evt_scores))
+        if evt_scores[best_local] > threshold:
+            selected_mask[idx[best_local]] = True
+
+    return selected_mask
+
+
 def compute_event_level_metrics(
     y_val,
     val_pred,
@@ -187,8 +214,9 @@ def compute_event_level_metrics(
     val_pred = np.asarray(val_pred, dtype=float)
 
     represented_event_ids = np.asarray(np.unique(event_id_val), dtype=int)
+    selected_mask = build_top1_selected_mask(event_id_val, val_pred, best_threshold)
     event_pred_positive_lookup = {
-        int(evt): bool(np.any(val_pred[event_id_val == evt] > best_threshold))
+        int(evt): bool(np.any(selected_mask[event_id_val == evt]))
         for evt in represented_event_ids
     }
 
@@ -263,6 +291,10 @@ def print_event_level_metrics(metrics, threshold):
 
 def compute_best_threshold(y_val, val_pred):
     precisions, recalls, thresholds = precision_recall_curve(y_val, val_pred)
+    if thresholds.size == 0:
+        # Degenerate case (e.g. constant scores): keep a neutral threshold.
+        return 0.5, 0.0
+
     precisions = precisions[:-1]
     recalls = recalls[:-1]
 
@@ -271,7 +303,11 @@ def compute_best_threshold(y_val, val_pred):
     valid = denom > 0
     f1_scores[valid] = 2.0 * (precisions[valid] * recalls[valid]) / denom[valid]
 
-    best_idx = int(np.argmax(f1_scores))
+    max_f1 = float(np.max(f1_scores))
+    # If several thresholds give the same best F1, pick the largest threshold
+    # to avoid always falling back to tiny/zero cut values.
+    tied_best = np.flatnonzero(np.isclose(f1_scores, max_f1, rtol=1e-12, atol=1e-12))
+    best_idx = int(tied_best[-1]) if tied_best.size else int(np.argmax(f1_scores))
     best_threshold = float(thresholds[best_idx])
     best_f1 = float(f1_scores[best_idx])
     return best_threshold, best_f1
@@ -371,7 +407,7 @@ def plot_purity_efficiency_curve(y_val, val_pred, best_threshold, best_f1, outpu
     best_recall = recalls[best_thresh_idx]
 
     fig, ax = plt.subplots(figsize=(7, 6))
-    ax.plot(recalls, precisions, color="tab:blue", lw=1.5, label=f"PR curve (AP={ap:.3f})")
+    ax.plot(recalls, precisions, color="tab:blue", lw=1.5, label=f"Purity-Efficiency curve (AP={ap:.3f})")
     ax.scatter(
         best_recall,
         best_precision,
@@ -388,13 +424,13 @@ def plot_purity_efficiency_curve(y_val, val_pred, best_threshold, best_f1, outpu
     ax.axvline(best_recall, color="tab:red", ls="--", alpha=0.3)
     ax.set_xlabel("efficiency")
     ax.set_ylabel("purity")
-    ax.set_title(f"[{plot_context}] Precision-Recall Curve")
+    ax.set_title(f"[{plot_context}] Purity-Efficiency Curve")
     ax.legend(loc="lower left")
     ax.grid(True, alpha=0.4)
     ax.set_xlim(0, 1.05)
     ax.set_ylim(0, 1.05)
     fig.suptitle(
-        f"[{plot_context}] Precision-Recall (Threshold = {best_threshold:.3f}, F1 = {best_f1:.3f})",
+        f"[{plot_context}] Purity-Efficiency (Threshold = {best_threshold:.3f}, F1 = {best_f1:.3f})",
         fontsize=13,
     )
     plt.tight_layout(rect=[0, 0, 1, 0.95])
@@ -501,10 +537,11 @@ def efficiency_purity_2d_q2x_event_level(
     all_val_has_scattered = np.asarray(all_val_has_scattered, dtype=bool)
     val_pred = np.asarray(val_pred, dtype=float)
 
-    # Build event-level prediction lookup from candidate-level scores.
+    # Build event-level prediction lookup from top-1 candidate selections.
     represented_event_ids = np.asarray(np.unique(event_id_val), dtype=int)
+    selected_mask = build_top1_selected_mask(event_id_val, val_pred, threshold)
     pred_positive_lookup = {
-        int(evt): bool(np.any(val_pred[event_id_val == evt] > threshold))
+        int(evt): bool(np.any(selected_mask[event_id_val == evt]))
         for evt in represented_event_ids
     }
 
@@ -810,8 +847,19 @@ def _shared_bins(values_a, values_b, feature_name):
     return np.linspace(vmin, vmax, 51)
 
 
-def plot_input_distributions_tp(X_val, y_val, val_pred, best_threshold, output_path, plot_context="Training"):
-    predicted_signal_mask = val_pred > best_threshold
+def plot_input_distributions_tp(
+    X_val,
+    y_val,
+    val_pred,
+    best_threshold,
+    output_path,
+    plot_context="Training",
+    event_id_val=None,
+):
+    if event_id_val is not None:
+        predicted_signal_mask = build_top1_selected_mask(event_id_val, val_pred, best_threshold)
+    else:
+        predicted_signal_mask = val_pred > best_threshold
     true_signal_mask = y_val == 1
 
     X_pred_signal = X_val[predicted_signal_mask]
@@ -847,9 +895,6 @@ def plot_input_distributions_tp(X_val, y_val, val_pred, best_threshold, output_p
         if feature == "is_leading_pt":
             axes[i].set_xlim(-0.5, 1.5)
             axes[i].set_xticks([0, 1])
-        if feature == "pt":
-            # Keep zero-valued entries visible while expanding the high-pt tail.
-            axes[i].set_xscale("symlog", linthresh=0.05)
         axes[i].legend(loc="upper right")
         axes[i].grid(True, alpha=0.3)
 
@@ -862,9 +907,20 @@ def plot_input_distributions_tp(X_val, y_val, val_pred, best_threshold, output_p
     plt.close(fig)
 
 
-def plot_input_distributions_tn(X_val, y_val, val_pred, best_threshold, output_path, plot_context="Training"):
+def plot_input_distributions_tn(
+    X_val,
+    y_val,
+    val_pred,
+    best_threshold,
+    output_path,
+    plot_context="Training",
+    event_id_val=None,
+):
     true_background_mask = y_val == 0
-    predicted_background_mask = val_pred <= best_threshold
+    if event_id_val is not None:
+        predicted_background_mask = ~build_top1_selected_mask(event_id_val, val_pred, best_threshold)
+    else:
+        predicted_background_mask = val_pred <= best_threshold
 
     X_true_background = X_val[true_background_mask]
     X_pred_background = X_val[predicted_background_mask]
@@ -899,9 +955,6 @@ def plot_input_distributions_tn(X_val, y_val, val_pred, best_threshold, output_p
         if feature == "is_leading_pt":
             axes[i].set_xlim(-0.5, 1.5)
             axes[i].set_xticks([0, 1])
-        if feature == "pt":
-            # Keep zero-valued entries visible while expanding the high-pt tail.
-            axes[i].set_xscale("symlog", linthresh=0.05)
         axes[i].legend(loc="upper right")
         axes[i].grid(True, alpha=0.3)
 
@@ -914,9 +967,20 @@ def plot_input_distributions_tn(X_val, y_val, val_pred, best_threshold, output_p
     plt.close(fig)
 
 
-def plot_input_distributions_fn(X_val, y_val, val_pred, best_threshold, output_path, plot_context="Training"):
+def plot_input_distributions_fn(
+    X_val,
+    y_val,
+    val_pred,
+    best_threshold,
+    output_path,
+    plot_context="Training",
+    event_id_val=None,
+):
     true_signal_mask = y_val == 1
-    predicted_background_mask = val_pred <= best_threshold
+    if event_id_val is not None:
+        predicted_background_mask = ~build_top1_selected_mask(event_id_val, val_pred, best_threshold)
+    else:
+        predicted_background_mask = val_pred <= best_threshold
     missed_signal_mask = true_signal_mask & predicted_background_mask
 
     X_true_signal = X_val[true_signal_mask]
@@ -952,9 +1016,6 @@ def plot_input_distributions_fn(X_val, y_val, val_pred, best_threshold, output_p
         if feature == "is_leading_pt":
             axes[i].set_xlim(-0.5, 1.5)
             axes[i].set_xticks([0, 1])
-        if feature == "pt":
-            # Keep zero-valued entries visible while expanding the high-pt tail.
-            axes[i].set_xscale("symlog", linthresh=0.05)
         axes[i].set_yscale("log")
         axes[i].legend(loc="upper right")
         axes[i].grid(True, alpha=0.3)
@@ -1079,20 +1140,6 @@ def main():
     print(f"[Candidate-Level] Maximum F1 Score: {best_f1:.4f}")
     print(f"[Candidate-Level] Optimal Threshold: {best_threshold:.4f}")
 
-    event_y_true, event_scores, event_truth_source = build_event_level_pr_arrays(
-        event_id_val=event_id_val,
-        val_pred=val_pred,
-        y_val=y_val,
-        truth_has_scattered_event_val=truth_has_scattered_event_val,
-        val_events=val_events,
-        all_val_events=all_val_events,
-        all_val_has_scattered=all_val_has_scattered,
-    )
-    event_best_threshold, event_best_f1 = compute_best_threshold(event_y_true, event_scores)
-    print(f"[Event-Level] Maximum F1 Score: {event_best_f1:.4f}")
-    print(f"[Event-Level] Optimal Threshold: {event_best_threshold:.4f}")
-    print(f"[Event-Level] Truth source for PR/threshold: {event_truth_source}")
-
     print_validation_truth_consistency(
         y_val,
         event_id_val=event_id_val,
@@ -1104,13 +1151,13 @@ def main():
         y_val,
         val_pred,
         event_id_val,
-        event_best_threshold,
+        best_threshold,
         truth_has_scattered_event_val=truth_has_scattered_event_val,
         val_events=val_events,
         all_val_events=all_val_events,
         all_val_has_scattered=all_val_has_scattered,
     )
-    print_event_level_metrics(event_metrics, event_best_threshold)
+    print_event_level_metrics(event_metrics, best_threshold)
 
     plot_feature_importance_avg_gain(
         model,
@@ -1130,14 +1177,6 @@ def main():
         f"{output_prefix}_purity_efficiency_bestf1_candidate_level.png",
         plot_context="Candidate-Level",
     )
-    plot_purity_efficiency_curve(
-        event_y_true,
-        event_scores,
-        event_best_threshold,
-        event_best_f1,
-        f"{output_prefix}_purity_efficiency_bestf1_event_level.png",
-        plot_context="Event-Level",
-    )
     plot_2d_q2x_maps(
         val_pred,
         y_val,
@@ -1154,8 +1193,8 @@ def main():
         event_id_val,
         event_Q2,
         event_x,
-        event_best_threshold,
-        event_best_f1,
+        best_threshold,
+        best_f1,
         f"{output_prefix}_q2x_phase_space_event_level.png",
         plot_context="Event-Level",
         truth_has_scattered_event_val=truth_has_scattered_event_val,
@@ -1172,6 +1211,7 @@ def main():
         best_threshold,
         f"{output_prefix}_input_distributions_tp_candidate_level.png",
         plot_context="Training",
+        event_id_val=event_id_val,
     )
     plot_input_distributions_tn(
         X_val,
@@ -1180,6 +1220,7 @@ def main():
         best_threshold,
         f"{output_prefix}_input_distributions_tn_candidate_level.png",
         plot_context="Training",
+        event_id_val=event_id_val,
     )
     plot_input_distributions_fn(
         X_val,
@@ -1188,6 +1229,7 @@ def main():
         best_threshold,
         f"{output_prefix}_input_distributions_fn_candidate_level.png",
         plot_context="Training",
+        event_id_val=event_id_val,
     )
 
     print("Saved evaluation plots.")

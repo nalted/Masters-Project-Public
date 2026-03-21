@@ -37,6 +37,10 @@ FILTER_NAME = [
     "_EcalBarrelClusterAssociations_*",
     "_EcalEndcapPClusterAssociations_*",
     "_EcalEndcapNClusterAssociations_*",
+    "ReconstructedParticles/ReconstructedParticles.*",
+    "ReconstructedParticleAssociations/ReconstructedParticleAssociations.*",
+    "ReconstructedParticlesAssociations/ReconstructedParticlesAssociations.*",
+    "_ReconstructedParticleAssociations_*",
 ]
 
 
@@ -82,6 +86,32 @@ def process_features(
     py_raw = events["ReconstructedChargedParticles.momentum.y"]
     pz_raw = events["ReconstructedChargedParticles.momentum.z"]
     charge = events["ReconstructedChargedParticles.charge"]
+
+    # Full reconstructed-particle collection (charged + neutral) used as
+    # event-level field for isolation sums.
+    reco_all_px = events["ReconstructedParticles.momentum.x"]
+    reco_all_py = events["ReconstructedParticles.momentum.y"]
+    reco_all_pz = events["ReconstructedParticles.momentum.z"]
+    reco_all_E = events["ReconstructedParticles.energy"]
+
+    # Keep associations loaded with branch-name fallback to support both
+    # naming conventions used across samples.
+    reco_all_to_mc_rec = _pick_field(
+        events,
+        [
+            "ReconstructedParticleAssociations.recID",
+            "ReconstructedParticlesAssociations.recID",
+            "_ReconstructedParticleAssociations_rec.index",
+        ],
+    )
+    reco_all_to_mc_sim = _pick_field(
+        events,
+        [
+            "ReconstructedParticleAssociations.simID",
+            "ReconstructedParticlesAssociations.simID",
+            "_ReconstructedParticleAssociations_sim.index",
+        ],
+    )
 
     mass = 0.000511
     massless_E = np.sqrt(px_raw**2 + py_raw**2 + pz_raw**2)
@@ -236,9 +266,43 @@ def process_features(
     endcapP_eta_clu, endcapP_phi_clu = func.xyz_to_eta_phi(endcapP_pos_x, endcapP_pos_y, endcapP_pos_z)
     endcapN_eta_clu, endcapN_phi_clu = func.xyz_to_eta_phi(endcapN_pos_x, endcapN_pos_y, endcapN_pos_z)
 
-    all_calo_eta = ak.concatenate([barrel_eta_clu, endcapP_eta_clu, endcapN_eta_clu], axis=1)
-    all_calo_phi = ak.concatenate([barrel_phi_clu, endcapP_phi_clu, endcapN_phi_clu], axis=1)
-    all_calo_E = ak.concatenate([barrel_E, endcapP_E, endcapN_E], axis=1)
+    all_reco_eta, all_reco_phi = func.xyz_to_eta_phi(reco_all_px, reco_all_py, reco_all_pz)
+    all_reco_E = reco_all_E
+
+    # Map each charged-particle candidate to its corresponding index in the
+    # full ReconstructedParticles collection using common MC truth indices.
+    cand_recoall_idx = []
+    for ch_rec_ids, ch_sim_ids, all_rec_ids, all_sim_ids, n in zip(
+        reco_to_mc_rec,
+        reco_to_mc_sim,
+        reco_all_to_mc_rec,
+        reco_all_to_mc_sim,
+        ak.num(px_raw),
+    ):
+        mc_for_ch = [None] * int(n)
+        for rec_id, sim_id in zip(ch_rec_ids, ch_sim_ids):
+            ri = int(rec_id)
+            if 0 <= ri < int(n):
+                mc_for_ch[ri] = int(sim_id)
+
+        recoall_for_mc = {}
+        for rec_id, sim_id in zip(all_rec_ids, all_sim_ids):
+            si = int(sim_id)
+            if si not in recoall_for_mc:
+                recoall_for_mc[si] = int(rec_id)
+
+        idxs = [None] * int(n)
+        for i, sim_idx in enumerate(mc_for_ch):
+            if sim_idx is not None and sim_idx in recoall_for_mc:
+                idxs[i] = recoall_for_mc[sim_idx]
+
+        cand_recoall_idx.append(idxs)
+
+    cand_recoall_idx = ak.Array(cand_recoall_idx)
+    cand_reco_E = ak.fill_none(all_reco_E[cand_recoall_idx], 0.0)
+    cand_reco_eta = ak.fill_none(all_reco_eta[cand_recoall_idx], 0.0)
+    cand_reco_phi = ak.fill_none(all_reco_phi[cand_recoall_idx], 0.0)
+    cand_has_recoall = ~ak.is_none(cand_recoall_idx, axis=-1)
 
     results_eta = [
         func.match_via_mc_vectorised(
@@ -339,14 +403,24 @@ def process_features(
         iso_calo_total = func.calculate_isolation_vectorised(
             matched_calo_eta,
             matched_calo_phi,
-            all_calo_eta,
-            all_calo_phi,
-            all_calo_E,
+            all_reco_eta,
+            all_reco_phi,
+            all_reco_E,
             cone_size=cone_size,
         )
+
+        d_eta_self = cand_reco_eta - matched_calo_eta
+        d_phi_self = cand_reco_phi - matched_calo_phi
+        d_phi_self = ak.where(d_phi_self > np.pi, d_phi_self - 2 * np.pi, d_phi_self)
+        d_phi_self = ak.where(d_phi_self < -np.pi, d_phi_self + 2 * np.pi, d_phi_self)
+        self_in_cone = cand_has_recoall & ((d_eta_self**2 + d_phi_self**2) < cone_size**2)
+
+        iso_other_total = iso_calo_total - ak.where(self_in_cone, cand_reco_E, 0.0)
+        iso_other_total = ak.where(iso_other_total > 0, iso_other_total, 0.0)
+
         isolation_frac_by_cone[cone_size] = ak.where(
-            iso_calo_total > 0,
-            matched_calo_E / iso_calo_total,
+            iso_other_total > 0,
+            matched_calo_E / iso_other_total,
             0.0,
         )
 
@@ -719,7 +793,7 @@ def plot_e_over_p_distribution(X_df, y_true, output_path):
     values = X_df["E_over_p"].to_numpy()
     bins = np.linspace(0.0, 1.5, 60)
 
-    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    fig, ax = plt.subplots(1, 1, figsize=(9.5, 6))
     _plot_three_class_hist(ax, values, bins, is_all, is_scattered_e, is_hfs)
     ax.set_xlim(0.0, 1.5)
     ax.set_title("Training: E/p Input Variable Distribution")
@@ -770,7 +844,7 @@ def plot_acoplanarity_distribution(X_df, y_true, output_path):
     values = X_df["acoplanarity"].to_numpy()
     bins = _shared_bins(values[is_all], values[is_scattered_e], values[is_hfs], "acoplanarity")
 
-    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    fig, ax = plt.subplots(1, 1, figsize=(9.5, 6))
     _plot_three_class_hist(ax, values, bins, is_all, is_scattered_e, is_hfs)
     ax.set_title("Training: Acoplanarity Input Variable Distribution")
     ax.set_xlabel("acoplanarity")
