@@ -23,7 +23,6 @@ FEATURE_COLUMNS = [
 ]
 
 FILTER_NAME = [
-    "ReconstructedChargedParticles/ReconstructedChargedParticles.*",
     "MCParticles/MCParticles.*",
     "EcalBarrelClusters/EcalBarrelClusters.*",
     "EcalEndcapPClusters/EcalEndcapPClusters.*",
@@ -31,9 +30,7 @@ FILTER_NAME = [
     "EcalBarrelClusterAssociations/EcalBarrelClusterAssociations.*",
     "EcalEndcapPClusterAssociations/EcalEndcapPClusterAssociations.*",
     "EcalEndcapNClusterAssociations/EcalEndcapNClusterAssociations.*",
-    "ReconstructedChargedParticleAssociations/ReconstructedChargedParticleAssociations.*",
     "InclusiveKinematicsTruth/InclusiveKinematicsTruth.*",
-    "_ReconstructedChargedParticleAssociations_*",
     "_EcalBarrelClusterAssociations_*",
     "_EcalEndcapPClusterAssociations_*",
     "_EcalEndcapNClusterAssociations_*",
@@ -82,17 +79,12 @@ def process_features(
     truex = events["InclusiveKinematicsTruth.x"]
     truey = events["InclusiveKinematicsTruth.y"]
 
-    px_raw = events["ReconstructedChargedParticles.momentum.x"]
-    py_raw = events["ReconstructedChargedParticles.momentum.y"]
-    pz_raw = events["ReconstructedChargedParticles.momentum.z"]
-    charge = events["ReconstructedChargedParticles.charge"]
-
-    # Full reconstructed-particle collection (charged + neutral) used as
-    # event-level field for isolation sums.
+    # Master reconstructed-particle collection (charged + neutral).
     reco_all_px = events["ReconstructedParticles.momentum.x"]
     reco_all_py = events["ReconstructedParticles.momentum.y"]
     reco_all_pz = events["ReconstructedParticles.momentum.z"]
     reco_all_E = events["ReconstructedParticles.energy"]
+    reco_all_charge = events["ReconstructedParticles.charge"]
 
     # Keep associations loaded with branch-name fallback to support both
     # naming conventions used across samples.
@@ -114,7 +106,7 @@ def process_features(
     )
 
     mass = 0.000511
-    massless_E = np.sqrt(px_raw**2 + py_raw**2 + pz_raw**2)
+    massless_E_all = np.sqrt(reco_all_px**2 + reco_all_py**2 + reco_all_pz**2)
 
     barrel_E = events["EcalBarrelClusters.energy"]
     endcapP_E = events["EcalEndcapPClusters.energy"]
@@ -130,33 +122,22 @@ def process_features(
     endcapN_pos_y = events["EcalEndcapNClusters.position.y"]
     endcapN_pos_z = events["EcalEndcapNClusters.position.z"]
 
-    reco_vec = vector.Array(
+    reco_all_vec = vector.Array(
         ak.zip(
             {
-                "px": px_raw,
-                "py": py_raw,
-                "pz": pz_raw,
-                "energy": np.sqrt(px_raw**2 + py_raw**2 + pz_raw**2 + mass**2),
+                "px": reco_all_px,
+                "py": reco_all_py,
+                "pz": reco_all_pz,
+                "energy": np.sqrt(reco_all_px**2 + reco_all_py**2 + reco_all_pz**2 + mass**2),
             }
         )
     )
-    pt = reco_vec.pt
-    p = np.sqrt(px_raw**2 + py_raw**2 + pz_raw**2)
+    pt_all = reco_all_vec.pt
+    p_all = np.sqrt(reco_all_px**2 + reco_all_py**2 + reco_all_pz**2)
 
-    reco_to_mc_rec = _pick_field(
-        events,
-        [
-            "ReconstructedChargedParticleAssociations.recID",
-            "_ReconstructedChargedParticleAssociations_rec.index",
-        ],
-    )
-    reco_to_mc_sim = _pick_field(
-        events,
-        [
-            "ReconstructedChargedParticleAssociations.simID",
-            "_ReconstructedChargedParticleAssociations_sim.index",
-        ],
-    )
+    # Charged candidates are defined as a view on the master reconstructed list.
+    candidate_mask = reco_all_charge != 0
+    reco_all_index = ak.local_index(reco_all_px, axis=1)
 
     barrel_clu_idx = _pick_field(
         events,
@@ -201,11 +182,11 @@ def process_features(
         ],
     )
 
-    boosted_px, boosted_py, boosted_pz, boosted_E = func.apply_boost(
-        px_raw,
-        py_raw,
-        pz_raw,
-        massless_E,
+    boosted_all_px, boosted_all_py, boosted_all_pz, boosted_all_E = func.apply_boost(
+        reco_all_px,
+        reco_all_py,
+        reco_all_pz,
+        massless_E_all,
         p_tot,
         rot_y_angle,
         rot_x_angle,
@@ -227,8 +208,8 @@ def process_features(
             nreco,
         )
         for r_rec, r_sim, bcl, bmc, bE, pcl, pmc, pE, ncl, nmc, nE, nreco in zip(
-            reco_to_mc_rec,
-            reco_to_mc_sim,
+            reco_all_to_mc_rec,
+            reco_all_to_mc_sim,
             barrel_clu_idx,
             barrel_mc_idx,
             barrel_E,
@@ -238,7 +219,7 @@ def process_features(
             endcapN_clu_idx,
             endcapN_mc_idx,
             endcapN_E,
-            ak.num(px_raw),
+            ak.num(reco_all_px),
         )
     ]
 
@@ -257,8 +238,8 @@ def process_features(
     )
 
     matched_E_over_p = ak.where(
-        (p > 0) & (charge != 0),
-        matched_calo_E / p,
+        (p_all > 0) & (reco_all_charge != 0),
+        matched_calo_E / p_all,
         np.nan,
     )
 
@@ -268,41 +249,6 @@ def process_features(
 
     all_reco_eta, all_reco_phi = func.xyz_to_eta_phi(reco_all_px, reco_all_py, reco_all_pz)
     all_reco_E = reco_all_E
-
-    # Map each charged-particle candidate to its corresponding index in the
-    # full ReconstructedParticles collection using common MC truth indices.
-    cand_recoall_idx = []
-    for ch_rec_ids, ch_sim_ids, all_rec_ids, all_sim_ids, n in zip(
-        reco_to_mc_rec,
-        reco_to_mc_sim,
-        reco_all_to_mc_rec,
-        reco_all_to_mc_sim,
-        ak.num(px_raw),
-    ):
-        mc_for_ch = [None] * int(n)
-        for rec_id, sim_id in zip(ch_rec_ids, ch_sim_ids):
-            ri = int(rec_id)
-            if 0 <= ri < int(n):
-                mc_for_ch[ri] = int(sim_id)
-
-        recoall_for_mc = {}
-        for rec_id, sim_id in zip(all_rec_ids, all_sim_ids):
-            si = int(sim_id)
-            if si not in recoall_for_mc:
-                recoall_for_mc[si] = int(rec_id)
-
-        idxs = [None] * int(n)
-        for i, sim_idx in enumerate(mc_for_ch):
-            if sim_idx is not None and sim_idx in recoall_for_mc:
-                idxs[i] = recoall_for_mc[sim_idx]
-
-        cand_recoall_idx.append(idxs)
-
-    cand_recoall_idx = ak.Array(cand_recoall_idx)
-    cand_reco_E = ak.fill_none(all_reco_E[cand_recoall_idx], 0.0)
-    cand_reco_eta = ak.fill_none(all_reco_eta[cand_recoall_idx], 0.0)
-    cand_reco_phi = ak.fill_none(all_reco_phi[cand_recoall_idx], 0.0)
-    cand_has_recoall = ~ak.is_none(cand_recoall_idx, axis=-1)
 
     results_eta = [
         func.match_via_mc_vectorised(
@@ -320,8 +266,8 @@ def process_features(
             nreco,
         )
         for r_rec, r_sim, bcl, bmc, bV, pcl, pmc, pV, ncl, nmc, nV, nreco in zip(
-            reco_to_mc_rec,
-            reco_to_mc_sim,
+            reco_all_to_mc_rec,
+            reco_all_to_mc_sim,
             barrel_clu_idx,
             barrel_mc_idx,
             barrel_eta_clu,
@@ -331,7 +277,7 @@ def process_features(
             endcapN_clu_idx,
             endcapN_mc_idx,
             endcapN_eta_clu,
-            ak.num(px_raw),
+            ak.num(reco_all_px),
         )
     ]
     barrel_eta_per_part = ak.Array([r[0] for r in results_eta])
@@ -354,8 +300,8 @@ def process_features(
             nreco,
         )
         for r_rec, r_sim, bcl, bmc, bV, pcl, pmc, pV, ncl, nmc, nV, nreco in zip(
-            reco_to_mc_rec,
-            reco_to_mc_sim,
+            reco_all_to_mc_rec,
+            reco_all_to_mc_sim,
             barrel_clu_idx,
             barrel_mc_idx,
             barrel_phi_clu,
@@ -365,7 +311,7 @@ def process_features(
             endcapN_clu_idx,
             endcapN_mc_idx,
             endcapN_phi_clu,
-            ak.num(px_raw),
+            ak.num(reco_all_px),
         )
     ]
     barrel_phi_per_part = ak.Array([r[0] for r in results_phi])
@@ -391,8 +337,16 @@ def process_features(
         ),
     )
 
-    # Use raw charged-track directions at the vertex for fallback self-veto.
-    cand_track_eta, cand_track_phi = func.xyz_to_eta_phi(px_raw, py_raw, pz_raw)
+    # Build charged-candidate views from the master reco collection.
+    cand_matched_calo_E = matched_calo_E[candidate_mask]
+    cand_matched_calo_eta = matched_calo_eta[candidate_mask]
+    cand_matched_calo_phi = matched_calo_phi[candidate_mask]
+    cand_e_over_p = matched_E_over_p[candidate_mask]
+    cand_charge = reco_all_charge[candidate_mask]
+    cand_pt = pt_all[candidate_mask]
+    cand_boosted_px = boosted_all_px[candidate_mask]
+    cand_boosted_py = boosted_all_py[candidate_mask]
+    cand_master_index = reco_all_index[candidate_mask]
 
     if isolation_cone_sizes is None:
         isolation_cone_sizes = [isolation_cone_size]
@@ -403,48 +357,23 @@ def process_features(
 
     isolation_frac_by_cone = {}
     for cone_size in ordered_unique_cones:
-        iso_calo_total = func.calculate_isolation_vectorised(
-            matched_calo_eta,
-            matched_calo_phi,
-            all_reco_eta,
-            all_reco_phi,
-            all_reco_E,
-            cone_size=cone_size,
-        )
+        d_eta = all_reco_eta[:, None, :] - cand_matched_calo_eta[:, :, None]
+        d_phi = all_reco_phi[:, None, :] - cand_matched_calo_phi[:, :, None]
+        d_phi = ak.where(d_phi > np.pi, d_phi - 2 * np.pi, d_phi)
+        d_phi = ak.where(d_phi < -np.pi, d_phi + 2 * np.pi, d_phi)
+        in_cone = (d_eta**2 + d_phi**2) < cone_size**2
+        not_self = reco_all_index[:, None, :] != cand_master_index[:, :, None]
 
-        d_eta_self = cand_reco_eta - matched_calo_eta
-        d_phi_self = cand_reco_phi - matched_calo_phi
-        d_phi_self = ak.where(d_phi_self > np.pi, d_phi_self - 2 * np.pi, d_phi_self)
-        d_phi_self = ak.where(d_phi_self < -np.pi, d_phi_self + 2 * np.pi, d_phi_self)
-        self_in_cone = cand_has_recoall & ((d_eta_self**2 + d_phi_self**2) < cone_size**2)
-
-        # If MC mapping fails, fall back to a tight DeltaR self-match in the
-        # full reconstructed-particle list using track-at-vertex coordinates
-        # to avoid calo-vs-track bending mismatches and double counting.
-        d_eta_fallback = all_reco_eta[:, None, :] - cand_track_eta[:, :, None]
-        d_phi_fallback = all_reco_phi[:, None, :] - cand_track_phi[:, :, None]
-        d_phi_fallback = ak.where(d_phi_fallback > np.pi, d_phi_fallback - 2 * np.pi, d_phi_fallback)
-        d_phi_fallback = ak.where(d_phi_fallback < -np.pi, d_phi_fallback + 2 * np.pi, d_phi_fallback)
-        fallback_self_mask = (d_eta_fallback**2 + d_phi_fallback**2) < (1e-4**2)
-        fallback_self_E = ak.sum(
-            ak.where(fallback_self_mask, all_reco_E[:, None, :], 0.0),
+        iso_other_total = ak.sum(
+            ak.where(in_cone & not_self, all_reco_E[:, None, :], 0.0),
             axis=-1,
         )
 
-        self_subtract_E = ak.where(
-            cand_has_recoall,
-            ak.where(self_in_cone, cand_reco_E, 0.0),
-            fallback_self_E,
-        )
-
-        iso_other_total = iso_calo_total - self_subtract_E
-        iso_other_total = ak.where(iso_other_total > 0, iso_other_total, 0.0)
-
-        total_cone_E = matched_calo_E + iso_other_total
+        total_cone_E = cand_matched_calo_E + iso_other_total
 
         isolation_frac_by_cone[cone_size] = ak.where(
             total_cone_E > 0,
-            matched_calo_E / total_cone_E,
+            cand_matched_calo_E / total_cone_E,
             0.0,
         )
 
@@ -463,12 +392,13 @@ def process_features(
     labels = []
     truth_pdg_per_reco = []
     truth_gen_per_reco = []
-    for rec_ids, sim_ids, pdgs, gens, n in zip(
-        reco_to_mc_rec,
-        reco_to_mc_sim,
+    for rec_ids, sim_ids, pdgs, gens, cand_idx, n_reco_all in zip(
+        reco_all_to_mc_rec,
+        reco_all_to_mc_sim,
         mc_pdg,
         mc_gen,
-        ak.num(boosted_px),
+        cand_master_index,
+        ak.num(reco_all_px),
     ):
         target_mc = -1
         for idx, (pdg, gen) in enumerate(zip(pdgs, gens)):
@@ -476,17 +406,21 @@ def process_features(
                 target_mc = idx
                 break
 
-        mc_for_reco = [None] * n
+        mc_for_reco = [None] * int(n_reco_all)
         for rec_id, sim_id in zip(rec_ids, sim_ids):
             ri = int(rec_id)
-            if 0 <= ri < n:
+            if 0 <= ri < int(n_reco_all):
                 mc_for_reco[ri] = int(sim_id)
 
-        lab = [1 if mc_for_reco[i] == target_mc and target_mc >= 0 else 0 for i in range(n)]
-        pdg_lab = [0] * n
-        gen_lab = [0] * n
-        for i in range(n):
-            sim_idx = mc_for_reco[i]
+        cand_idx_np = np.asarray(cand_idx, dtype=np.intp)
+        lab = [0] * len(cand_idx_np)
+        pdg_lab = [0] * len(cand_idx_np)
+        gen_lab = [0] * len(cand_idx_np)
+
+        for i, reco_idx in enumerate(cand_idx_np):
+            sim_idx = mc_for_reco[int(reco_idx)]
+            if sim_idx == target_mc and target_mc >= 0:
+                lab[i] = 1
             if sim_idx is not None and 0 <= sim_idx < len(pdgs):
                 pdg_lab[i] = int(pdgs[sim_idx])
                 gen_lab[i] = int(gens[sim_idx])
@@ -499,10 +433,9 @@ def process_features(
     truth_pdg = ak.Array(truth_pdg_per_reco)
     truth_gen = ak.Array(truth_gen_per_reco)
 
-    # Candidate definition requires matched calorimeter energy.
-    # Diagnostics below compare before/after against the full
-    # ReconstructedChargedParticles branch population.
-    calo_cluster_mask = matched_calo_E > 0
+    # Candidate definition starts from charged ReconstructedParticles; keep
+    # calo-matched candidates for model inputs.
+    calo_cluster_mask = cand_matched_calo_E > 0
 
     labels_flat = ak.to_numpy(ak.flatten(labels)).astype(int)
     calo_mask_flat = ak.to_numpy(ak.flatten(calo_cluster_mask)).astype(bool)
@@ -513,23 +446,18 @@ def process_features(
     n_background_kept_calo = int(np.sum((labels_flat == 0) & calo_mask_flat))
     mask = calo_cluster_mask
 
-    boosted_px_kept = boosted_px[mask]
-    boosted_py_kept = boosted_py[mask]
-    pt_kept = pt[mask]
-    charge_kept = charge[mask]
-    e_over_p_kept = matched_E_over_p[mask]
+    boosted_px_kept = cand_boosted_px[mask]
+    boosted_py_kept = cand_boosted_py[mask]
+    pt_kept = cand_pt[mask]
+    charge_kept = cand_charge[mask]
+    e_over_p_kept = cand_e_over_p[mask]
     iso_primary_kept = isolation_frac_by_cone[float(isolation_cone_size)][mask]
     truth_pdg_kept = truth_pdg[mask]
     truth_gen_kept = truth_gen[mask]
     labels_kept = labels[mask]
 
     # Recompute event-dependent features on the kept-particle view so labels/features are self-consistent.
-    acoplanarity_kept = func.calc_acoplanarity(
-        boosted_px_kept,
-        boosted_py_kept,
-        boosted_px_kept,
-        boosted_py_kept,
-    )
+    acoplanarity_kept = func.calc_acoplanarity(boosted_px_kept, boosted_py_kept, boosted_all_px, boosted_all_py)
     is_leading_pt_kept = func.find_greatest_pt(pt_kept)
 
     Q2_per_event = ak.fill_none(ak.firsts(trueQ2), 0.0)
