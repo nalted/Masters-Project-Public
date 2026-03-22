@@ -391,6 +391,9 @@ def process_features(
         ),
     )
 
+    # Use raw charged-track directions at the vertex for fallback self-veto.
+    cand_track_eta, cand_track_phi = func.xyz_to_eta_phi(px_raw, py_raw, pz_raw)
+
     if isolation_cone_sizes is None:
         isolation_cone_sizes = [isolation_cone_size]
     # Preserve user order while removing duplicates.
@@ -416,9 +419,10 @@ def process_features(
         self_in_cone = cand_has_recoall & ((d_eta_self**2 + d_phi_self**2) < cone_size**2)
 
         # If MC mapping fails, fall back to a tight DeltaR self-match in the
-        # full reconstructed-particle list to avoid double counting candidate energy.
-        d_eta_fallback = all_reco_eta[:, None, :] - matched_calo_eta[:, :, None]
-        d_phi_fallback = all_reco_phi[:, None, :] - matched_calo_phi[:, :, None]
+        # full reconstructed-particle list using track-at-vertex coordinates
+        # to avoid calo-vs-track bending mismatches and double counting.
+        d_eta_fallback = all_reco_eta[:, None, :] - cand_track_eta[:, :, None]
+        d_phi_fallback = all_reco_phi[:, None, :] - cand_track_phi[:, :, None]
         d_phi_fallback = ak.where(d_phi_fallback > np.pi, d_phi_fallback - 2 * np.pi, d_phi_fallback)
         d_phi_fallback = ak.where(d_phi_fallback < -np.pi, d_phi_fallback + 2 * np.pi, d_phi_fallback)
         fallback_self_mask = (d_eta_fallback**2 + d_phi_fallback**2) < (1e-4**2)
