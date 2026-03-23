@@ -139,6 +139,26 @@ def process_features(
     candidate_mask = reco_all_charge != 0
     reco_all_index = ak.local_index(reco_all_px, axis=1)
 
+    # Build a per-reco-particle MC sim ID array from the association table.
+    # Association entry k maps reco particle recID[k] -> MC particle simID[k],
+    # so we must scatter simIDs to the correct reco positions (same logic as
+    # the labels loop further below).  Unmatched particles get a unique
+    # negative sentinel so they never incorrectly match each other.
+    _sim_per_reco_list = []
+    for rec_ids, sim_ids, n in zip(
+        reco_all_to_mc_rec, reco_all_to_mc_sim, ak.num(reco_all_px)
+    ):
+        n = int(n)
+        lookup = -(np.arange(n, dtype=np.int64) + 2)   # unique per particle
+        for ri, si in zip(
+            np.asarray(rec_ids, dtype=np.intp),
+            np.asarray(sim_ids, dtype=np.intp),
+        ):
+            if 0 <= ri < n:
+                lookup[ri] = si
+        _sim_per_reco_list.append(lookup)
+    sim_id_per_reco = ak.Array(_sim_per_reco_list)
+
     barrel_clu_idx = _pick_field(
         events,
         [
@@ -347,6 +367,7 @@ def process_features(
     cand_boosted_px = boosted_all_px[candidate_mask]
     cand_boosted_py = boosted_all_py[candidate_mask]
     cand_master_index = reco_all_index[candidate_mask]
+    cand_to_mc_sim = sim_id_per_reco[candidate_mask]
 
     if isolation_cone_sizes is None:
         isolation_cone_sizes = [isolation_cone_size]
@@ -361,8 +382,14 @@ def process_features(
         d_phi = all_reco_phi[:, None, :] - cand_matched_calo_phi[:, :, None]
         d_phi = ak.where(d_phi > np.pi, d_phi - 2 * np.pi, d_phi)
         d_phi = ak.where(d_phi < -np.pi, d_phi + 2 * np.pi, d_phi)
-        in_cone = (d_eta**2 + d_phi**2) < cone_size**2
-        not_self = reco_all_index[:, None, :] != cand_master_index[:, :, None]
+        dR2 = d_eta**2 + d_phi**2
+        # Outer cone selects neighbours; inner cone (dR > 0.1) excludes
+        # neutral PFA fragments reconstructed from the same calorimeter
+        # cluster as the candidate — they sit at dR ≈ 0 and would otherwise
+        # cause a spurious spike at f_iso = 0.5.
+        in_cone = (dR2 < cone_size**2) & (dR2 > 0.01)
+        not_self = (reco_all_index[:, None, :] != cand_master_index[:, :, None]) & \
+                   (sim_id_per_reco[:, None, :] != cand_to_mc_sim[:, :, None])
 
         iso_other_total = ak.sum(
             ak.where(in_cone & not_self, all_reco_E[:, None, :], 0.0),

@@ -402,22 +402,69 @@ def plot_purity_efficiency_curve(y_val, val_pred, best_threshold, best_f1, outpu
     precisions, recalls, thresholds = precision_recall_curve(y_val, val_pred)
     ap = average_precision_score(y_val, val_pred)
 
+    # Threshold-aligned arrays for uncertainty propagation.
+    precisions_thr = precisions[:-1]
+    recalls_thr = recalls[:-1]
+
+    n_true_signal = float(np.sum(np.asarray(y_val).astype(int) == 1))
+    tp = recalls_thr * n_true_signal
+    n_pred_pos = np.divide(tp, precisions_thr, out=np.zeros_like(tp), where=precisions_thr > 0)
+
+    if n_true_signal > 0:
+        eff_err = np.sqrt(np.clip(recalls_thr * (1.0 - recalls_thr) / n_true_signal, 0.0, None))
+    else:
+        eff_err = np.zeros_like(recalls_thr)
+    pur_err = np.sqrt(
+        np.divide(
+            np.clip(precisions_thr * (1.0 - precisions_thr), 0.0, None),
+            n_pred_pos,
+            out=np.zeros_like(precisions_thr),
+            where=n_pred_pos > 0,
+        )
+    )
+
+    pur_lo = np.clip(precisions_thr - pur_err, 0.0, 1.0)
+    pur_hi = np.clip(precisions_thr + pur_err, 0.0, 1.0)
+
     best_thresh_idx = int(np.argmin(np.abs(thresholds - best_threshold)))
-    best_precision = precisions[best_thresh_idx]
-    best_recall = recalls[best_thresh_idx]
+    best_precision = precisions_thr[best_thresh_idx]
+    best_recall = recalls_thr[best_thresh_idx]
+    best_precision_err = pur_err[best_thresh_idx]
+    best_recall_err = eff_err[best_thresh_idx]
 
     fig, ax = plt.subplots(figsize=(7, 6))
-    ax.plot(recalls, precisions, color="tab:blue", lw=1.5, label=f"Purity-Efficiency curve (AP={ap:.3f})")
-    ax.scatter(
+    ax.step(
+        recalls_thr,
+        precisions_thr,
+        where="post",
+        color="tab:blue",
+        lw=1.7,
+        label=f"Purity-Efficiency curve (AP={ap:.3f})",
+    )
+    ax.fill_between(
+        recalls_thr,
+        pur_lo,
+        pur_hi,
+        step="post",
+        color="tab:blue",
+        alpha=0.18,
+        label="1$\\sigma$ binomial band",
+    )
+    ax.errorbar(
         best_recall,
         best_precision,
         color="tab:red",
-        s=50,
+        xerr=best_recall_err,
+        yerr=best_precision_err,
+        fmt="o",
+        markersize=5,
+        capsize=4,
+        elinewidth=1.2,
         zorder=5,
         label=(
             f"max F1={best_f1:.3f} @ threshold={best_threshold:.3f}\n"
-            f"purity={best_precision:.3f}\n"
-            f"efficiency={best_recall:.3f}"
+            f"purity={best_precision:.3f} ± {best_precision_err:.3f}\n"
+            f"efficiency={best_recall:.3f} ± {best_recall_err:.3f}"
         ),
     )
     ax.axhline(best_precision, color="tab:red", ls="--", alpha=0.3)
@@ -876,7 +923,9 @@ def plot_input_distributions_tp(
             bins=bins,
             histtype="step",
             color="tab:red",
-            linewidth=1.5,
+            linewidth=2.0,
+            linestyle="-",
+            zorder=2,
             alpha=0.6,
             label="True Scattered Electron",
         )
@@ -885,7 +934,9 @@ def plot_input_distributions_tp(
             bins=bins,
             histtype="step",
             color="tab:blue",
-            linewidth=1.5,
+            linewidth=1.8,
+            linestyle="--",
+            zorder=3,
             label="Predicted Scattered Electron",
         )
 
@@ -936,7 +987,9 @@ def plot_input_distributions_tn(
             bins=bins,
             histtype="step",
             color="tab:red",
-            linewidth=1.5,
+            linewidth=2.0,
+            linestyle="-",
+            zorder=2,
             alpha=0.7,
             label="True Background",
         )
@@ -945,7 +998,9 @@ def plot_input_distributions_tn(
             bins=bins,
             histtype="step",
             color="tab:blue",
-            linewidth=1.5,
+            linewidth=1.8,
+            linestyle="--",
+            zorder=3,
             label="Predicted Background",
         )
 
@@ -997,7 +1052,9 @@ def plot_input_distributions_fn(
             bins=bins,
             histtype="step",
             color="tab:green",
-            linewidth=1.5,
+            linewidth=2.0,
+            linestyle="-",
+            zorder=2,
             alpha=0.7,
             label="All True Scattered Electrons",
         )
@@ -1006,7 +1063,9 @@ def plot_input_distributions_fn(
             bins=bins,
             histtype="step",
             color="tab:purple",
-            linewidth=1.5,
+            linewidth=1.8,
+            linestyle="--",
+            zorder=3,
             label="Missed Scattered Electrons (FN)",
         )
 
